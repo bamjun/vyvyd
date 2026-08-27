@@ -1,0 +1,589 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  AlertCircle,
+  Download,
+  DownloadCloud,
+  Images,
+  Loader2,
+  Maximize2,
+  RefreshCw,
+  Sparkles,
+} from 'lucide-react';
+import confetti from 'canvas-confetti';
+import { formatBytes } from '@/lib/utils';
+
+interface ImageResizerProps {
+  onSuccess: (size: number) => void;
+}
+
+type ResizeMode = 'percentage' | 'bounds';
+type OutputFormat = 'original' | 'jpeg' | 'png' | 'webp';
+
+interface ImageItem {
+  id: string;
+  file: File;
+  src: string;
+  width: number;
+  height: number;
+}
+
+interface ResizeResult {
+  id: string;
+  originalName: string;
+  downloadName: string;
+  url: string;
+  size: number;
+  originalSize: number;
+  width: number;
+  height: number;
+}
+
+const SUPPORTED_INPUT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+const loadImage = (src: string): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('이미지를 읽을 수 없습니다.'));
+    image.src = src;
+  });
+
+const canvasToBlob = (canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> =>
+  new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error('이미지 변환 결과를 만들 수 없습니다.'));
+      }
+    }, type, quality);
+  });
+
+const getOutputType = (format: OutputFormat, originalType: string) => {
+  if (format === 'jpeg') return 'image/jpeg';
+  if (format === 'png') return 'image/png';
+  if (format === 'webp') return 'image/webp';
+  return SUPPORTED_INPUT_TYPES.has(originalType) ? originalType : 'image/png';
+};
+
+const getExtension = (type: string) => {
+  if (type === 'image/jpeg') return 'jpg';
+  if (type === 'image/webp') return 'webp';
+  return 'png';
+};
+
+const getDownloadName = (fileName: string, width: number, height: number, type: string) => {
+  const baseName = fileName.replace(/\.[^.]+$/, '') || 'image';
+  return `${baseName}_${width}x${height}.${getExtension(type)}`;
+};
+
+const getTargetDimensions = (
+  item: Pick<ImageItem, 'width' | 'height'>,
+  mode: ResizeMode,
+  percentage: number,
+  maxWidth: number,
+  maxHeight: number,
+) => {
+  const scale = mode === 'percentage'
+    ? Math.min(1, Math.max(0.01, percentage / 100))
+    : Math.min(1, maxWidth / item.width, maxHeight / item.height);
+
+  return {
+    width: Math.max(1, Math.round(item.width * scale)),
+    height: Math.max(1, Math.round(item.height * scale)),
+  };
+};
+
+export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess }) => {
+  const [imageItems, setImageItems] = useState<ImageItem[]>([]);
+  const [resizeMode, setResizeMode] = useState<ResizeMode>('percentage');
+  const [percentage, setPercentage] = useState(50);
+  const [maxWidth, setMaxWidth] = useState(1920);
+  const [maxHeight, setMaxHeight] = useState(1920);
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>('original');
+  const [quality, setQuality] = useState(85);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isLoadingImages, setIsLoadingImages] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [progressIndex, setProgressIndex] = useState(0);
+  const [results, setResults] = useState<ResizeResult[]>([]);
+  const [errorMessage, setErrorMessage] = useState('');
+  const inputUrlsRef = useRef<Set<string>>(new Set());
+  const resultUrlsRef = useRef<Set<string>>(new Set());
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    return () => {
+      inputUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      resultUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, []);
+
+  const clearUrls = (urls: Set<string>) => {
+    urls.forEach((url) => URL.revokeObjectURL(url));
+    urls.clear();
+  };
+
+  const clearResults = () => {
+    clearUrls(resultUrlsRef.current);
+    setResults([]);
+    setProgressIndex(0);
+  };
+
+  const reset = () => {
+    if (isProcessing) return;
+    clearUrls(inputUrlsRef.current);
+    clearResults();
+    setImageItems([]);
+    setErrorMessage('');
+  };
+
+  const loadFiles = async (selectedFiles: File[]) => {
+    if (isProcessing) return;
+
+    const files = selectedFiles.filter((file) => SUPPORTED_INPUT_TYPES.has(file.type));
+    if (files.length === 0) {
+      setErrorMessage('JPG, PNG 또는 WebP 이미지를 선택해 주세요.');
+      return;
+    }
+
+    reset();
+    setIsLoadingImages(true);
+    setErrorMessage('');
+
+    try {
+      const items = await Promise.all(
+        files.map(async (file, index): Promise<ImageItem> => {
+          const src = URL.createObjectURL(file);
+          inputUrlsRef.current.add(src);
+          const image = await loadImage(src);
+
+          return {
+            id: `${file.name}-${file.lastModified}-${index}`,
+            file,
+            src,
+            width: image.naturalWidth,
+            height: image.naturalHeight,
+          };
+        }),
+      );
+
+      setImageItems(items);
+      if (files.length !== selectedFiles.length) {
+        setErrorMessage('지원하지 않는 파일은 제외했습니다. JPG, PNG, WebP만 처리됩니다.');
+      }
+    } catch (error) {
+      console.error(error);
+      clearUrls(inputUrlsRef.current);
+      setImageItems([]);
+      setErrorMessage('일부 이미지를 읽을 수 없습니다. 파일을 다시 선택해 주세요.');
+    } finally {
+      setIsLoadingImages(false);
+    }
+  };
+
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    await loadFiles(Array.from(event.target.files ?? []));
+    event.target.value = '';
+  };
+
+  const updateSetting = (callback: () => void) => {
+    if (isProcessing) return;
+    clearResults();
+    setErrorMessage('');
+    callback();
+  };
+
+  const createResizedImages = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas || imageItems.length === 0 || isProcessing) return;
+
+    if (resizeMode === 'bounds' && (maxWidth < 1 || maxHeight < 1)) {
+      setErrorMessage('최대 가로와 세로는 1px 이상이어야 합니다.');
+      return;
+    }
+
+    setIsProcessing(true);
+    clearResults();
+    setErrorMessage('');
+
+    const nextResults: ResizeResult[] = [];
+
+    try {
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
+
+      for (let index = 0; index < imageItems.length; index += 1) {
+        const item = imageItems[index];
+        const target = getTargetDimensions(item, resizeMode, percentage, maxWidth, maxHeight);
+        const outputType = getOutputType(outputFormat, item.file.type);
+        const image = await loadImage(item.src);
+
+        setProgressIndex(index + 1);
+        canvas.width = target.width;
+        canvas.height = target.height;
+        context.clearRect(0, 0, target.width, target.height);
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
+
+        if (outputType === 'image/jpeg') {
+          context.fillStyle = '#ffffff';
+          context.fillRect(0, 0, target.width, target.height);
+        }
+
+        context.drawImage(image, 0, 0, target.width, target.height);
+        const blob = await canvasToBlob(
+          canvas,
+          outputType,
+          outputType === 'image/png' ? undefined : quality / 100,
+        );
+        const url = URL.createObjectURL(blob);
+        resultUrlsRef.current.add(url);
+
+        const result: ResizeResult = {
+          id: item.id,
+          originalName: item.file.name,
+          downloadName: getDownloadName(item.file.name, target.width, target.height, outputType),
+          url,
+          size: blob.size,
+          originalSize: item.file.size,
+          width: target.width,
+          height: target.height,
+        };
+
+        nextResults.push(result);
+        setResults([...nextResults]);
+        onSuccess(Math.max(0, item.file.size - blob.size));
+      }
+
+      confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
+    } catch (error) {
+      console.error(error);
+      setErrorMessage('이미지 축소 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const downloadAll = () => {
+    results.forEach((result) => {
+      const link = document.createElement('a');
+      link.href = result.url;
+      link.download = result.downloadName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    });
+  };
+
+  const totalOriginalSize = imageItems.reduce((sum, item) => sum + item.file.size, 0);
+  const totalResultSize = results.reduce((sum, result) => sum + result.size, 0);
+  const isLossyOutput = outputFormat === 'jpeg' || outputFormat === 'webp'
+    || (outputFormat === 'original' && imageItems.some((item) => item.file.type !== 'image/png'));
+
+  return (
+    <div className="space-y-8">
+      {imageItems.length === 0 ? (
+        <div
+          onDragEnter={(event) => {
+            event.preventDefault();
+            setIsDragging(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={(event) => {
+            event.preventDefault();
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDragging(false);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setIsDragging(false);
+            void loadFiles(Array.from(event.dataTransfer.files));
+          }}
+          className={`flex flex-col items-center justify-center border-2 border-dashed rounded-2xl p-12 transition duration-300 ${
+            isDragging
+              ? 'border-purple-400 bg-purple-500/10'
+              : 'border-purple-500/20 hover:border-purple-500/50 bg-white/5'
+          }`}
+        >
+          <Images className="w-16 h-16 text-purple-400 mb-4 animate-pulse" />
+          <h3 className="text-xl font-medium mb-1">이미지 크기 줄이기</h3>
+          <p className="text-gray-400 text-sm mb-6 text-center max-w-md">
+            이미지는 자르지 않습니다. 원본 비율과 전체 내용을 그대로 유지한 채 여러 파일의 가로·세로 크기만 한 번에 줄입니다.
+          </p>
+          <label className="px-6 py-3 bg-purple-600 hover:bg-purple-700 font-medium rounded-xl cursor-pointer shadow-lg hover:shadow-purple-500/20 transition">
+            이미지 여러 개 선택
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              multiple
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </label>
+          <p className="text-[11px] text-gray-500 mt-3">또는 여기에 드래그 · JPG, PNG, WebP</p>
+          {isLoadingImages && <p className="text-xs text-purple-300 mt-4">이미지 불러오는 중...</p>}
+          {errorMessage && <p className="text-xs text-red-300 mt-4">{errorMessage}</p>}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="lg:col-span-7 space-y-4">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center space-x-2">
+                <span className="text-sm font-semibold px-2.5 py-1 bg-purple-500/10 text-purple-400 rounded-md border border-purple-500/20">
+                  Step 1
+                </span>
+                <span className="font-medium text-gray-200">{imageItems.length}개 파일 선택됨</span>
+              </div>
+              <button
+                onClick={reset}
+                disabled={isProcessing}
+                className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50 flex items-center space-x-1"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>다시 선택</span>
+              </button>
+            </div>
+
+            <div className="rounded-2xl glass-panel p-4 min-h-[300px] max-h-[520px] overflow-y-auto">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {imageItems.map((item) => {
+                  const target = getTargetDimensions(item, resizeMode, percentage, maxWidth, maxHeight);
+                  return (
+                    <div key={item.id} className="rounded-xl bg-[#252733] border border-white/10 p-2 space-y-2">
+                      <div className="aspect-square rounded-lg overflow-hidden bg-black/30 flex items-center justify-center">
+                        <img src={item.src} alt={item.file.name} className="max-h-full max-w-full object-contain" />
+                      </div>
+                      <p className="text-xs text-gray-300 truncate" title={item.file.name}>{item.file.name}</p>
+                      <p className="text-[10px] text-gray-500">원본 {item.width} × {item.height}px</p>
+                      <p className="text-[10px] text-purple-300">결과 {target.width} × {target.height}px</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="text-xs text-gray-500 flex flex-wrap justify-between gap-2 px-1">
+              <span>총 원본 용량 {formatBytes(totalOriginalSize)}</span>
+              <span className="text-purple-300">비율 유지 · 자르기 없음 · 확대 없음</span>
+            </div>
+          </div>
+
+          <div className="lg:col-span-5 space-y-6">
+            <div className="glass-panel-glow rounded-2xl p-6 space-y-6">
+              <h3 className="text-lg font-semibold flex items-center space-x-2 border-b border-white/5 pb-3">
+                <Maximize2 className="w-5 h-5 text-purple-400" />
+                <span>축소 설정</span>
+              </h3>
+
+              <div className="space-y-5">
+                <div>
+                  <label className="block text-xs font-semibold uppercase text-gray-400 mb-2">크기 지정 방식</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => updateSetting(() => setResizeMode('percentage'))}
+                      disabled={isProcessing}
+                      className={`rounded-xl border px-3 py-2.5 text-sm transition ${
+                        resizeMode === 'percentage'
+                          ? 'border-purple-500 bg-purple-500/15 text-purple-300'
+                          : 'border-white/10 bg-white/5 text-gray-400 hover:text-gray-200'
+                      } disabled:opacity-50`}
+                    >
+                      비율로 줄이기
+                    </button>
+                    <button
+                      onClick={() => updateSetting(() => setResizeMode('bounds'))}
+                      disabled={isProcessing}
+                      className={`rounded-xl border px-3 py-2.5 text-sm transition ${
+                        resizeMode === 'bounds'
+                          ? 'border-purple-500 bg-purple-500/15 text-purple-300'
+                          : 'border-white/10 bg-white/5 text-gray-400 hover:text-gray-200'
+                      } disabled:opacity-50`}
+                    >
+                      최대 크기 맞춤
+                    </button>
+                  </div>
+                </div>
+
+                {resizeMode === 'percentage' ? (
+                  <div>
+                    <div className="flex justify-between mb-2">
+                      <label className="text-xs font-semibold uppercase text-gray-400">원본 대비 크기</label>
+                      <span className="text-xs font-mono text-purple-400">{percentage}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={percentage}
+                      onChange={(event) => updateSetting(() => setPercentage(Number(event.target.value)))}
+                      disabled={isProcessing}
+                      className="w-full accent-purple-500 bg-white/5 h-1.5 rounded-lg appearance-none cursor-pointer disabled:opacity-50"
+                    />
+                    <div className="grid grid-cols-4 gap-2 mt-3">
+                      {[25, 50, 75, 100].map((preset) => (
+                        <button
+                          key={preset}
+                          onClick={() => updateSetting(() => setPercentage(preset))}
+                          disabled={isProcessing}
+                          className={`rounded-lg border py-1.5 text-xs transition ${
+                            percentage === preset
+                              ? 'border-purple-500/60 bg-purple-500/15 text-purple-300'
+                              : 'border-white/10 text-gray-400 hover:text-gray-200'
+                          } disabled:opacity-50`}
+                        >
+                          {preset}%
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-gray-400 mb-2">최대 출력 크기</label>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <span className="text-xs text-gray-500 block mb-1">최대 가로 (px)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={maxWidth}
+                          onChange={(event) => updateSetting(() => setMaxWidth(Math.max(1, Number(event.target.value))))}
+                          disabled={isProcessing}
+                          className="w-full bg-[#121318] border border-purple-500/30 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
+                        />
+                      </div>
+                      <div>
+                        <span className="text-xs text-gray-500 block mb-1">최대 세로 (px)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={maxHeight}
+                          onChange={(event) => updateSetting(() => setMaxHeight(Math.max(1, Number(event.target.value))))}
+                          disabled={isProcessing}
+                          className="w-full bg-[#121318] border border-purple-500/30 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
+                        />
+                      </div>
+                    </div>
+                    <span className="text-[10px] text-purple-300 block mt-2">
+                      각 이미지가 이 영역 안에 들어오도록 자동 축소합니다. 작은 이미지는 확대하지 않습니다.
+                    </span>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-semibold uppercase text-gray-400 mb-2">저장 형식</label>
+                  <select
+                    value={outputFormat}
+                    onChange={(event) => updateSetting(() => setOutputFormat(event.target.value as OutputFormat))}
+                    disabled={isProcessing}
+                    className="w-full bg-[#121318] border border-white/10 rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
+                  >
+                    <option value="original">원본 형식 유지</option>
+                    <option value="jpeg">JPG</option>
+                    <option value="png">PNG</option>
+                    <option value="webp">WebP</option>
+                  </select>
+                </div>
+
+                {isLossyOutput && (
+                  <div>
+                    <div className="flex justify-between mb-2">
+                      <label className="text-xs font-semibold uppercase text-gray-400">화질</label>
+                      <span className="text-xs font-mono text-purple-400">{quality}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={40}
+                      max={100}
+                      step={1}
+                      value={quality}
+                      onChange={(event) => updateSetting(() => setQuality(Number(event.target.value)))}
+                      disabled={isProcessing}
+                      className="w-full accent-purple-500 bg-white/5 h-1.5 rounded-lg appearance-none cursor-pointer disabled:opacity-50"
+                    />
+                  </div>
+                )}
+
+                <div className="rounded-xl bg-green-500/5 border border-green-500/15 p-4">
+                  <p className="text-xs text-green-300 leading-relaxed">
+                    원본 비율을 잠가 전체 이미지를 그대로 축소합니다. 중앙 크롭, 가장자리 잘림, 강제 늘림은 적용하지 않습니다.
+                  </p>
+                </div>
+              </div>
+
+              {isProcessing ? (
+                <div className="w-full py-4 bg-[#121318] border border-white/10 rounded-xl flex flex-col items-center justify-center space-y-2 text-purple-400 font-medium">
+                  <div className="flex items-center space-x-3">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>{progressIndex}/{imageItems.length} 처리 중...</span>
+                  </div>
+                  <span className="text-xs text-gray-400">브라우저에서 안전하게 일괄 축소 중</span>
+                </div>
+              ) : (
+                <button
+                  onClick={createResizedImages}
+                  className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 transition duration-300 flex items-center justify-center space-x-2"
+                >
+                  <Sparkles className="w-5 h-5 animate-pulse" />
+                  <span>{imageItems.length}개 이미지 크기 줄이기</span>
+                </button>
+              )}
+            </div>
+
+            {results.length > 0 && (
+              <div className="glass-panel rounded-2xl p-6 space-y-4 border border-green-500/20">
+                <div className="flex flex-wrap justify-between items-center gap-3">
+                  <span className="text-sm font-semibold text-green-400 flex items-center space-x-1.5">
+                    <AlertCircle className="w-4 h-4" />
+                    <span>{results.length}/{imageItems.length}개 완료</span>
+                  </span>
+                  {results.length > 1 && (
+                    <button
+                      onClick={downloadAll}
+                      className="flex items-center gap-1.5 rounded-lg bg-green-600 hover:bg-green-500 px-3 py-2 text-xs font-medium transition"
+                    >
+                      <DownloadCloud className="w-4 h-4" />
+                      모두 다운로드
+                    </button>
+                  )}
+                </div>
+
+                <div className="rounded-xl bg-black/20 border border-white/5 px-3 py-2 text-xs text-gray-400 flex justify-between gap-3">
+                  <span>{formatBytes(totalOriginalSize)}</span>
+                  <span>→</span>
+                  <span className="text-green-300">{formatBytes(totalResultSize)}</span>
+                </div>
+
+                <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                  {results.map((result) => (
+                    <div key={result.id} className="flex items-center gap-3 rounded-xl bg-black/30 border border-white/5 p-2">
+                      <img src={result.url} alt={`축소된 ${result.originalName}`} className="w-14 h-14 object-contain rounded bg-black/40" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs text-gray-300 truncate" title={result.downloadName}>{result.downloadName}</p>
+                        <p className="text-[10px] text-gray-500">
+                          {result.width} × {result.height}px · {formatBytes(result.originalSize)} → {formatBytes(result.size)}
+                        </p>
+                      </div>
+                      <a
+                        href={result.url}
+                        download={result.downloadName}
+                        className="shrink-0 p-2 rounded-lg bg-green-600 hover:bg-green-500 transition"
+                        aria-label={`${result.originalName} 다운로드`}
+                        title="다운로드"
+                      >
+                        <Download className="w-4 h-4" />
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {errorMessage && <p className="text-xs text-red-300">{errorMessage}</p>}
+          </div>
+        </div>
+      )}
+      <canvas ref={canvasRef} className="hidden" aria-hidden="true" />
+    </div>
+  );
+};

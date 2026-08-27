@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { VideoToGif } from './components/VideoToGif';
 import { GifCropper } from './components/GifCropper';
 import { ImagePadding } from './components/ImagePadding';
-import { Film, Image, ImagePlus, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
+import { ImageResizer } from './components/ImageResizer';
+import { Film, Image, ImagePlus, Minimize2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'image'>('video');
+  const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'image' | 'resize'>('resize');
   const [sessionConversions, setSessionConversions] = useState<number>(0);
   const [sessionBytesSaved, setSessionBytesSaved] = useState<number>(0);
 
@@ -55,7 +56,7 @@ function App() {
         {/* Visual Hero Tagline */}
         <div className="text-center max-w-2xl mx-auto space-y-4">
           <h2 className="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-b from-white to-gray-400 bg-clip-text text-transparent">
-            Convert & Crop GIFs Instantly
+            Convert, Resize & Crop Instantly
           </h2>
           <p className="text-gray-400 text-sm md:text-base">
             No server upload required. Processing happens 100% on your device, ensuring maximum speed and complete privacy.
@@ -64,10 +65,10 @@ function App() {
 
         {/* Tab Selection */}
         <div className="flex justify-center">
-          <div className="bg-[#121318] p-1.5 rounded-2xl flex space-x-2 border border-white/5 shadow-inner">
+          <div className="bg-[#121318] p-1.5 rounded-2xl grid grid-cols-2 md:grid-cols-4 gap-2 border border-white/5 shadow-inner">
             <button
               onClick={() => setActiveTab('video')}
-              className={`flex items-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
+              className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
                 activeTab === 'video'
                   ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
                   : 'text-gray-400 hover:text-gray-200'
@@ -78,7 +79,7 @@ function App() {
             </button>
             <button
               onClick={() => setActiveTab('gif')}
-              className={`flex items-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
+              className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
                 activeTab === 'gif'
                   ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
                   : 'text-gray-400 hover:text-gray-200'
@@ -89,7 +90,7 @@ function App() {
             </button>
             <button
               onClick={() => setActiveTab('image')}
-              className={`flex items-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
+              className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
                 activeTab === 'image'
                   ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
                   : 'text-gray-400 hover:text-gray-200'
@@ -97,6 +98,17 @@ function App() {
             >
               <ImagePlus className="w-4 h-4" />
               <span>Image 9:16</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('resize')}
+              className={`flex items-center justify-center space-x-2 px-4 md:px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
+                activeTab === 'resize'
+                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              <Minimize2 className="w-4 h-4" />
+              <span>Image Resize</span>
             </button>
           </div>
         </div>
@@ -111,8 +123,10 @@ function App() {
             <VideoToGif onSuccess={handleConversionSuccess} />
           ) : activeTab === 'gif' ? (
             <GifCropper onSuccess={handleConversionSuccess} />
-          ) : (
+          ) : activeTab === 'image' ? (
             <ImagePadding onSuccess={handleConversionSuccess} />
+          ) : (
+            <ImageResizer onSuccess={handleConversionSuccess} />
           )}
         </div>
 
