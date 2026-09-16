@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertCircle, Download, ImagePlus, Loader2, RefreshCw, Sparkles } from 'lucide-react';
+import { AlertCircle, Download, DownloadCloud, ImagePlus, Loader2, RefreshCw, Sparkles } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { formatBytes } from '@/lib/utils';
 
@@ -187,6 +187,17 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess }) => {
     }
   };
 
+  const downloadAll = () => {
+    results.forEach((result) => {
+      const link = document.createElement('a');
+      link.href = result.url;
+      link.download = getOutputFileName(result.fileName);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    });
+  };
+
   const firstItem = imageItems[0];
   const outputLabel = firstItem
     ? `${firstItem.width} × ${firstItem.outputHeight}px`
@@ -323,11 +334,21 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess }) => {
 
             {results.length > 0 && (
               <div className="glass-panel rounded-2xl p-6 space-y-4 border border-green-500/20">
-                <div className="flex justify-between items-center">
+                <div className="flex flex-wrap justify-between items-center gap-3">
                   <span className="text-sm font-semibold text-green-400 flex items-center space-x-1.5">
                     <AlertCircle className="w-4 h-4" />
                     <span>{results.length}/{imageItems.length} Images Ready!</span>
                   </span>
+                  {results.length > 1 && results.length === imageItems.length && (
+                    <button
+                      type="button"
+                      onClick={downloadAll}
+                      className="flex items-center gap-1.5 rounded-lg bg-green-600 hover:bg-green-500 px-3 py-2 text-xs font-medium transition"
+                    >
+                      <DownloadCloud className="w-4 h-4" />
+                      모두 다운로드
+                    </button>
+                  )}
                 </div>
                 <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
                   {results.map((result) => (
