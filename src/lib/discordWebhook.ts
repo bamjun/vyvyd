@@ -8,6 +8,7 @@ interface SendDiscordFilesOptions {
 }
 
 const FILES_PER_MESSAGE = 10;
+const DISCORD_WEBHOOK_STORAGE_KEY = 'vyvyd.discord-webhooks.v1';
 const DISCORD_WEBHOOK_HOSTS = new Set([
   'discord.com',
   'www.discord.com',
@@ -40,6 +41,48 @@ const getWebhookEndpoint = (rawUrl: string) => {
 
   url.searchParams.set('wait', 'true');
   return url.toString();
+};
+
+export const isDiscordWebhookUrl = (rawUrl: string) => {
+  try {
+    getWebhookEndpoint(rawUrl);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const getStoredDiscordWebhooks = () => {
+  try {
+    const storedValue = window.localStorage.getItem(DISCORD_WEBHOOK_STORAGE_KEY);
+    if (!storedValue) return [];
+
+    const parsed = JSON.parse(storedValue) as unknown;
+    if (!Array.isArray(parsed)) return [];
+
+    return Array.from(new Set(
+      parsed.filter((item): item is string => typeof item === 'string' && isDiscordWebhookUrl(item)),
+    ));
+  } catch {
+    return [];
+  }
+};
+
+export const storeDiscordWebhook = (rawUrl: string) => {
+  const url = rawUrl.trim();
+  if (!isDiscordWebhookUrl(url)) {
+    throw new Error('올바른 Discord Webhook URL을 입력해 주세요.');
+  }
+
+  const nextWebhooks = [url, ...getStoredDiscordWebhooks().filter((storedUrl) => storedUrl !== url)];
+  window.localStorage.setItem(DISCORD_WEBHOOK_STORAGE_KEY, JSON.stringify(nextWebhooks));
+  return nextWebhooks;
+};
+
+export const removeStoredDiscordWebhook = (url: string) => {
+  const nextWebhooks = getStoredDiscordWebhooks().filter((storedUrl) => storedUrl !== url);
+  window.localStorage.setItem(DISCORD_WEBHOOK_STORAGE_KEY, JSON.stringify(nextWebhooks));
+  return nextWebhooks;
 };
 
 const getResponseError = (status: number) => {

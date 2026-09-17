@@ -4,13 +4,15 @@ import { GifCropper } from './components/GifCropper';
 import { ImageEditor } from './components/ImageEditor';
 import { DiscordWebhookField } from './components/DiscordWebhookField';
 import { DiscordUrlFormatter } from './components/DiscordUrlFormatter';
-import { getDiscordWebhookFromSearch } from './lib/discordWebhook';
+import { getDiscordWebhookFromSearch, getStoredDiscordWebhooks } from './lib/discordWebhook';
 import { Film, Image, Images, Link2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
 function App() {
   const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'editor' | 'formatter'>('editor');
-  const initialDiscordWebhook = getDiscordWebhookFromSearch(window.location.search);
-  const [discordWebhookUrl, setDiscordWebhookUrl] = useState(initialDiscordWebhook);
+  const discordWebhookFromUrl = getDiscordWebhookFromSearch(window.location.search);
+  const [discordWebhookUrl, setDiscordWebhookUrl] = useState(
+    () => discordWebhookFromUrl || getStoredDiscordWebhooks()[0] || '',
+  );
   const [sessionConversions, setSessionConversions] = useState<number>(0);
   const [sessionBytesSaved, setSessionBytesSaved] = useState<number>(0);
 
@@ -121,7 +123,7 @@ function App() {
           <DiscordWebhookField
             value={discordWebhookUrl}
             onChange={setDiscordWebhookUrl}
-            loadedFromUrl={initialDiscordWebhook.length > 0}
+            loadedFromUrl={discordWebhookFromUrl.length > 0}
           />
         )}
 
