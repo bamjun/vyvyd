@@ -14,7 +14,8 @@ import confetti from 'canvas-confetti';
 import { DiscordSendStatus } from './DiscordSendStatus';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { formatBytes } from '@/lib/utils';
-import { getImageSlices } from '@/lib/imageSplitter';
+import { getImageSlices, ImageSlice } from '@/lib/imageSplitter';
+import { processGifFilters } from '@/lib/gifProcessing';
 
 interface ImageSplitterProps {
   onSuccess: (size: number) => void;
@@ -41,7 +42,7 @@ interface SplitResult {
   row: number;
 }
 
-const SUPPORTED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const SUPPORTED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const MAX_DIVISIONS = 20;
 
 const loadImage = (url: string): Promise<HTMLImageElement> =>
@@ -63,6 +64,7 @@ const canvasToBlob = (canvas: HTMLCanvasElement, type: string): Promise<Blob> =>
 const getExtension = (type: string) => {
   if (type === 'image/jpeg') return 'jpg';
   if (type === 'image/webp') return 'webp';
+  if (type === 'image/gif') return 'gif';
   return 'png';
 };
 
@@ -91,6 +93,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   const [isLoading, setIsLoading] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [completedParts, setCompletedParts] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const inputUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
@@ -113,6 +116,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
     clearUrls(resultUrlsRef.current);
     setResults([]);
     setCompletedParts(0);
+    setProgressMessage('');
   };
 
   const reset = () => {
@@ -128,7 +132,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
     const supportedFiles = selectedFiles.filter((file) => SUPPORTED_TYPES.has(file.type));
 
     if (supportedFiles.length === 0) {
-      setErrorMessage('JPG, PNG 또는 WebP 이미지를 선택해 주세요.');
+      setErrorMessage('JPG, PNG, WebP 또는 GIF 이미지를 선택해 주세요.');
       return;
     }
 
@@ -154,7 +158,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
 
       setImages(nextImages);
       if (supportedFiles.length !== selectedFiles.length) {
-        setErrorMessage('지원하지 않는 파일은 제외했습니다. JPG, PNG, WebP만 처리됩니다.');
+        setErrorMessage('지원하지 않는 파일은 제외했습니다. JPG, PNG, WebP, GIF만 처리됩니다.');
       }
     } catch (error) {
       console.error(error);
@@ -199,14 +203,56 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
     const nextResults: SplitResult[] = [];
     const context = canvas.getContext('2d');
 
+    const addResult = (source: SourceImage, slice: ImageSlice, blob: Blob, outputType: string) => {
+      const url = URL.createObjectURL(blob);
+      resultUrlsRef.current.add(url);
+      const result: SplitResult = {
+        id: `${source.id}-${slice.row}-${slice.column}`,
+        sourceName: source.file.name,
+        fileName: getPartFileName(
+          source.file.name,
+          slice.row,
+          slice.column,
+          rows,
+          columns,
+          outputType,
+        ),
+        url,
+        size: blob.size,
+        width: slice.width,
+        height: slice.height,
+        column: slice.column,
+        row: slice.row,
+      };
+
+      nextResults.push(result);
+      setResults([...nextResults]);
+      setCompletedParts(nextResults.length);
+      onSuccess(blob.size);
+    };
+
     try {
       if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
 
       for (const source of images) {
-        const image = await loadImage(source.url);
         const slices = getImageSlices(source.width, source.height, columns, rows);
+        const outputType = SUPPORTED_TYPES.has(source.file.type) ? source.file.type : 'image/png';
+
+        if (source.file.type === 'image/gif') {
+          const blobs = await processGifFilters(
+            source.file,
+            slices.map((slice) => `crop=${slice.width}:${slice.height}:${slice.x}:${slice.y}`),
+            setProgressMessage,
+          );
+
+          blobs.forEach((blob, index) => addResult(source, slices[index], blob, outputType));
+          continue;
+        }
+
+        const image = await loadImage(source.url);
 
         for (const slice of slices) {
+          setProgressMessage(`${source.file.name} 조각 ${nextResults.length + 1}/${totalParts} 처리 중...`);
           canvas.width = slice.width;
           canvas.height = slice.height;
           context.clearRect(0, 0, slice.width, slice.height);
@@ -221,34 +267,8 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
             slice.width,
             slice.height,
           );
-
-          const outputType = SUPPORTED_TYPES.has(source.file.type) ? source.file.type : 'image/png';
           const blob = await canvasToBlob(canvas, outputType);
-          const url = URL.createObjectURL(blob);
-          resultUrlsRef.current.add(url);
-          const result: SplitResult = {
-            id: `${source.id}-${slice.row}-${slice.column}`,
-            sourceName: source.file.name,
-            fileName: getPartFileName(
-              source.file.name,
-              slice.row,
-              slice.column,
-              rows,
-              columns,
-              outputType,
-            ),
-            url,
-            size: blob.size,
-            width: slice.width,
-            height: slice.height,
-            column: slice.column,
-            row: slice.row,
-          };
-
-          nextResults.push(result);
-          setResults([...nextResults]);
-          setCompletedParts(nextResults.length);
-          onSuccess(blob.size);
+          addResult(source, slice, blob, outputType);
         }
       }
 
@@ -258,6 +278,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
       setErrorMessage('이미지를 자르는 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
     } finally {
       setIsProcessing(false);
+      setProgressMessage('');
     }
   };
 
@@ -310,19 +331,19 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
           <Scissors className="mb-4 h-16 w-16 text-purple-400" />
           <h3 className="mb-1 text-xl font-medium">이미지 균등 자르기</h3>
           <p className="mb-6 max-w-md text-center text-sm text-gray-400">
-            여러 이미지를 선택하고 가로·세로 분할 수를 지정하면 동일한 격자로 한 번에 잘라냅니다.
+            여러 이미지와 GIF를 선택하고 가로·세로 분할 수를 지정하면 동일한 격자로 한 번에 잘라냅니다.
           </p>
           <label className="cursor-pointer rounded-xl bg-purple-600 px-6 py-3 font-medium shadow-lg transition hover:bg-purple-700 hover:shadow-purple-500/20">
             이미지 여러 개 선택
             <input
               type="file"
-              accept="image/jpeg,image/png,image/webp"
+              accept="image/jpeg,image/png,image/webp,image/gif"
               multiple
               onChange={handleFileChange}
               className="hidden"
             />
           </label>
-          <p className="mt-3 text-[11px] text-gray-500">또는 여기에 드래그 · JPG, PNG, WebP</p>
+          <p className="mt-3 text-[11px] text-gray-500">또는 여기에 드래그 · JPG, PNG, WebP, GIF</p>
           {isLoading && <p className="mt-4 text-xs text-purple-300">이미지 불러오는 중...</p>}
           {errorMessage && <p className="mt-4 text-xs text-red-300">{errorMessage}</p>}
         </div>
@@ -421,6 +442,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                     <Loader2 className="h-5 w-5 animate-spin" />
                     <span>{completedParts}/{totalParts} 자르는 중...</span>
                   </div>
+                  <span className="px-3 text-center text-xs text-gray-400">{progressMessage || '브라우저에서 순차 처리 중'}</span>
                 </div>
               ) : (
                 <button

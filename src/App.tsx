@@ -1,14 +1,13 @@
 import { useState } from 'react';
 import { VideoToGif } from './components/VideoToGif';
-import { GifCropper } from './components/GifCropper';
 import { ImageEditor } from './components/ImageEditor';
 import { DiscordWebhookField } from './components/DiscordWebhookField';
 import { DiscordUrlFormatter } from './components/DiscordUrlFormatter';
 import { getDiscordWebhookFromSearch, getStoredDiscordWebhooks } from './lib/discordWebhook';
-import { Film, Image, Images, Link2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
+import { Film, Images, Link2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'editor' | 'formatter'>('editor');
+  const [activeTab, setActiveTab] = useState<'video' | 'editor' | 'formatter'>('editor');
   const discordWebhookFromUrl = getDiscordWebhookFromSearch(window.location.search);
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(
     () => discordWebhookFromUrl || getStoredDiscordWebhooks()[0] || '',
@@ -71,7 +70,7 @@ function App() {
 
         {/* Tab Selection */}
         <div className="flex justify-center">
-          <div className="grid w-full max-w-4xl grid-cols-2 gap-2 rounded-2xl border border-white/5 bg-[#121318] p-1.5 shadow-inner md:grid-cols-4">
+          <div className="grid w-full max-w-3xl grid-cols-1 gap-2 rounded-2xl border border-white/5 bg-[#121318] p-1.5 shadow-inner sm:grid-cols-3">
             <button
               onClick={() => setActiveTab('video')}
               className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
@@ -82,17 +81,6 @@ function App() {
             >
               <Film className="w-4 h-4" />
               <span>MP4 to GIF</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('gif')}
-              className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
-                activeTab === 'gif'
-                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
-                  : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              <Image className="w-4 h-4" />
-              <span>GIF Cropper</span>
             </button>
             <button
               onClick={() => setActiveTab('editor')}
@@ -137,8 +125,6 @@ function App() {
             <DiscordUrlFormatter />
           ) : activeTab === 'video' ? (
             <VideoToGif onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
-          ) : activeTab === 'gif' ? (
-            <GifCropper onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           ) : (
             <ImageEditor onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           )}

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Frame, Images, Minimize2, Scissors } from 'lucide-react';
+import { Crop, Frame, Images, Minimize2, Scissors } from 'lucide-react';
+import { ImageCropper } from './ImageCropper';
 import { ImagePadding } from './ImagePadding';
 import { ImageResizer } from './ImageResizer';
 import { ImageSplitter } from './ImageSplitter';
@@ -9,7 +10,7 @@ interface ImageEditorProps {
   discordWebhookUrl: string;
 }
 
-type EditorMode = 'padding' | 'resize' | 'split';
+type EditorMode = 'padding' | 'resize' | 'split' | 'crop';
 
 export const ImageEditor: React.FC<ImageEditorProps> = ({ onSuccess, discordWebhookUrl }) => {
   const [mode, setMode] = useState<EditorMode>('resize');
@@ -23,11 +24,11 @@ export const ImageEditor: React.FC<ImageEditorProps> = ({ onSuccess, discordWebh
             Image Editor
           </h3>
           <p className="mt-1 text-sm text-gray-400">
-            9:16 여백 추가, 비율 유지 크기 조절, 균등 분할을 한 곳에서 처리합니다.
+            9:16 여백 추가, 크기 조절, 균등 분할, 자유 자르기를 한 곳에서 처리합니다.
           </p>
         </div>
 
-        <div className="grid shrink-0 grid-cols-1 gap-2 rounded-xl border border-white/5 bg-[#121318] p-1.5 sm:grid-cols-3">
+        <div className="grid shrink-0 grid-cols-1 gap-2 rounded-xl border border-white/5 bg-[#121318] p-1.5 sm:grid-cols-2 xl:grid-cols-4">
           <button
             type="button"
             onClick={() => setMode('padding')}
@@ -64,6 +65,18 @@ export const ImageEditor: React.FC<ImageEditorProps> = ({ onSuccess, discordWebh
             <Scissors className="h-4 w-4" />
             균등 자르기
           </button>
+          <button
+            type="button"
+            onClick={() => setMode('crop')}
+            className={`flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition ${
+              mode === 'crop'
+                ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
+                : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
+            }`}
+          >
+            <Crop className="h-4 w-4" />
+            자유 자르기
+          </button>
         </div>
       </div>
 
@@ -75,6 +88,9 @@ export const ImageEditor: React.FC<ImageEditorProps> = ({ onSuccess, discordWebh
       </div>
       <div className={mode === 'split' ? 'block' : 'hidden'}>
         <ImageSplitter onSuccess={onSuccess} discordWebhookUrl={discordWebhookUrl} />
+      </div>
+      <div className={mode === 'crop' ? 'block' : 'hidden'}>
+        <ImageCropper onSuccess={onSuccess} discordWebhookUrl={discordWebhookUrl} />
       </div>
     </div>
   );

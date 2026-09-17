@@ -4,6 +4,7 @@ import confetti from 'canvas-confetti';
 import { formatBytes } from '@/lib/utils';
 import { DiscordSendStatus } from './DiscordSendStatus';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
+import { processGifFilters } from '@/lib/gifProcessing';
 
 interface ImagePaddingProps {
   onSuccess: (size: number) => void;
@@ -24,6 +25,7 @@ interface ImageItem {
 interface ImageResult {
   id: string;
   fileName: string;
+  outputName: string;
   url: string;
   size: number;
   width: number;
@@ -57,8 +59,10 @@ const loadImage = (src: string): Promise<HTMLImageElement> =>
     image.src = src;
   });
 
-const getOutputFileName = (fileName: string) =>
-  `9x16_${fileName.replace(/\.[^.]+$/, '') || 'image'}.png`;
+const SUPPORTED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+
+const getOutputFileName = (fileName: string, isGif: boolean) =>
+  `9x16_${fileName.replace(/\.[^.]+$/, '') || 'image'}.${isGif ? 'gif' : 'png'}`;
 
 export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWebhookUrl }) => {
   const [imageItems, setImageItems] = useState<ImageItem[]>([]);
@@ -66,6 +70,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   const [isLoadingImages, setIsLoadingImages] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressIndex, setProgressIndex] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
   const [results, setResults] = useState<ImageResult[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
   const imageUrlsRef = useRef<Set<string>>(new Set());
@@ -92,11 +97,13 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
     setImageItems([]);
     setResults([]);
     setProgressIndex(0);
+    setProgressMessage('');
     setErrorMessage('');
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith('image/'));
+    const selectedFiles = Array.from(event.target.files ?? []);
+    const files = selectedFiles.filter((file) => SUPPORTED_TYPES.has(file.type));
     if (files.length === 0 || isProcessing) return;
 
     reset();
@@ -123,6 +130,9 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
       );
 
       setImageItems(items);
+      if (files.length !== selectedFiles.length) {
+        setErrorMessage('지원하지 않는 파일은 제외했습니다. JPG, PNG, WebP, GIF만 처리됩니다.');
+      }
     } catch (error) {
       console.error(error);
       clearUrls(imageUrlsRef.current);
@@ -153,25 +163,40 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
       for (let index = 0; index < imageItems.length; index += 1) {
         const item = imageItems[index];
         setProgressIndex(index + 1);
+        setProgressMessage(`${item.file.name} 처리 중...`);
 
-        const image = await loadImage(item.src);
-        canvas.width = item.width;
-        canvas.height = item.outputHeight;
-        context.clearRect(0, 0, canvas.width, canvas.height);
+        const isGif = item.file.type === 'image/gif';
+        let blob: Blob;
 
-        if (background === 'white') {
-          context.fillStyle = '#ffffff';
-          context.fillRect(0, 0, canvas.width, canvas.height);
+        if (isGif) {
+          const paddingColor = background === 'white' ? 'white' : '0x00000000';
+          [blob] = await processGifFilters(
+            item.file,
+            [`pad=${item.width}:${item.outputHeight}:0:0:color=${paddingColor}`],
+            setProgressMessage,
+          );
+        } else {
+          const image = await loadImage(item.src);
+          canvas.width = item.width;
+          canvas.height = item.outputHeight;
+          context.clearRect(0, 0, canvas.width, canvas.height);
+
+          if (background === 'white') {
+            context.fillStyle = '#ffffff';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+          }
+
+          context.drawImage(image, 0, 0, item.width, item.height);
+          blob = await canvasToBlob(canvas);
         }
 
-        context.drawImage(image, 0, 0, item.width, item.height);
-        const blob = await canvasToBlob(canvas);
         const url = URL.createObjectURL(blob);
         resultUrlsRef.current.add(url);
 
         const result: ImageResult = {
           id: item.id,
           fileName: item.file.name,
+          outputName: getOutputFileName(item.file.name, isGif),
           url,
           size: blob.size,
           width: item.width,
@@ -188,6 +213,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
       setErrorMessage('이미지 변환 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
     } finally {
       setIsProcessing(false);
+      setProgressMessage('');
     }
   };
 
@@ -195,7 +221,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
     results.forEach((result) => {
       const link = document.createElement('a');
       link.href = result.url;
-      link.download = getOutputFileName(result.fileName);
+      link.download = result.outputName;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -203,13 +229,13 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   };
 
   const sendResultToDiscord = (result: ImageResult) => {
-    void sendToDiscord(result.id, [{ url: result.url, name: getOutputFileName(result.fileName) }]);
+    void sendToDiscord(result.id, [{ url: result.url, name: result.outputName }]);
   };
 
   const sendAllToDiscord = () => {
     void sendToDiscord('all', results.map((result) => ({
       url: result.url,
-      name: getOutputFileName(result.fileName),
+      name: result.outputName,
     })));
   };
 
@@ -226,12 +252,13 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
           <ImagePlus className="w-16 h-16 text-purple-400 mb-4 animate-pulse" />
           <h3 className="text-xl font-medium mb-1">Upload Images</h3>
           <p className="text-gray-400 text-sm mb-6 text-center max-w-sm">
-            여러 이미지를 한 번에 선택하면 원본을 상단에 배치하고 아래 빈 공간을 추가해 9:16 PNG로 일괄 변환합니다.
+            여러 이미지와 GIF를 한 번에 선택하면 원본을 상단에 배치하고 아래 빈 공간을 추가해 9:16으로 변환합니다.
           </p>
           <label className="px-6 py-3 bg-purple-600 hover:bg-purple-700 font-medium rounded-xl cursor-pointer shadow-lg hover:shadow-purple-500/20 transition">
             Choose Image Files
-            <input type="file" accept="image/*" multiple onChange={handleFileChange} className="hidden" />
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple onChange={handleFileChange} className="hidden" />
           </label>
+          <p className="mt-3 text-[11px] text-gray-500">JPG, PNG, WebP, GIF</p>
           {isLoadingImages && <p className="text-xs text-purple-300 mt-4">이미지 불러오는 중...</p>}
           {errorMessage && <p className="text-xs text-red-300 mt-4">{errorMessage}</p>}
         </div>
@@ -314,7 +341,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                     </button>
                   </div>
                   <span className="text-[10px] text-gray-500 block mt-2">
-                    기본값은 투명한 빈 공간이며 PNG로 저장됩니다.
+                    기본값은 투명한 빈 공간입니다. GIF는 애니메이션을 유지하고, 나머지는 PNG로 저장됩니다.
                   </span>
                 </div>
 
@@ -333,7 +360,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                     <Loader2 className="w-5 h-5 animate-spin" />
                     <span>Creating {progressIndex}/{imageItems.length}...</span>
                   </div>
-                  <span className="text-xs text-gray-400">브라우저에서 순차 처리 중</span>
+                  <span className="text-xs text-gray-400 text-center">{progressMessage || '브라우저에서 순차 처리 중'}</span>
                 </div>
               ) : (
                 <button
@@ -382,16 +409,16 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                     <div key={result.id} className="flex items-center gap-3 rounded-xl bg-black/30 border border-white/5 p-2">
                       <img src={result.url} alt={`9:16 ${result.fileName}`} className="w-12 h-16 object-contain rounded bg-white/5" />
                       <div className="min-w-0 flex-1">
-                        <p className="text-xs text-gray-300 truncate" title={result.fileName}>{result.fileName}</p>
+                        <p className="text-xs text-gray-300 truncate" title={result.outputName}>{result.outputName}</p>
                         <p className="text-[10px] text-gray-500">{result.width} × {result.height}px · {formatBytes(result.size)}</p>
                       </div>
                       <div className="flex shrink-0 gap-2">
                         <a
                           href={result.url}
-                          download={getOutputFileName(result.fileName)}
+                          download={result.outputName}
                           className="p-2 rounded-lg bg-green-600 hover:bg-green-500 transition"
                           aria-label={`${result.fileName} 다운로드`}
-                          title="Download PNG"
+                          title="다운로드"
                         >
                           <Download className="w-4 h-4" />
                         </a>

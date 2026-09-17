@@ -14,6 +14,7 @@ import confetti from 'canvas-confetti';
 import { formatBytes } from '@/lib/utils';
 import { DiscordSendStatus } from './DiscordSendStatus';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
+import { processGifFilters } from '@/lib/gifProcessing';
 
 interface ImageResizerProps {
   onSuccess: (size: number) => void;
@@ -42,7 +43,7 @@ interface ResizeResult {
   height: number;
 }
 
-const SUPPORTED_INPUT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const SUPPORTED_INPUT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
 const loadImage = (src: string): Promise<HTMLImageElement> =>
   new Promise((resolve, reject) => {
@@ -73,6 +74,7 @@ const getOutputType = (format: OutputFormat, originalType: string) => {
 const getExtension = (type: string) => {
   if (type === 'image/jpeg') return 'jpg';
   if (type === 'image/webp') return 'webp';
+  if (type === 'image/gif') return 'gif';
   return 'png';
 };
 
@@ -110,6 +112,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const [isLoadingImages, setIsLoadingImages] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressIndex, setProgressIndex] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
   const [results, setResults] = useState<ResizeResult[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
   const inputUrlsRef = useRef<Set<string>>(new Set());
@@ -133,6 +136,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
     clearUrls(resultUrlsRef.current);
     setResults([]);
     setProgressIndex(0);
+    setProgressMessage('');
   };
 
   const reset = () => {
@@ -148,7 +152,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
     const files = selectedFiles.filter((file) => SUPPORTED_INPUT_TYPES.has(file.type));
     if (files.length === 0) {
-      setErrorMessage('JPG, PNG 또는 WebP 이미지를 선택해 주세요.');
+      setErrorMessage('JPG, PNG, WebP 또는 GIF 이미지를 선택해 주세요.');
       return;
     }
 
@@ -175,7 +179,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
       setImageItems(items);
       if (files.length !== selectedFiles.length) {
-        setErrorMessage('지원하지 않는 파일은 제외했습니다. JPG, PNG, WebP만 처리됩니다.');
+        setErrorMessage('지원하지 않는 파일은 제외했습니다. JPG, PNG, WebP, GIF만 처리됩니다.');
       }
     } catch (error) {
       console.error(error);
@@ -222,26 +226,38 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
         const item = imageItems[index];
         const target = getTargetDimensions(item, resizeMode, percentage, maxWidth, maxHeight);
         const outputType = getOutputType(outputFormat, item.file.type);
-        const image = await loadImage(item.src);
+        const preserveAnimatedGif = item.file.type === 'image/gif' && outputFormat === 'original';
 
         setProgressIndex(index + 1);
-        canvas.width = target.width;
-        canvas.height = target.height;
-        context.clearRect(0, 0, target.width, target.height);
-        context.imageSmoothingEnabled = true;
-        context.imageSmoothingQuality = 'high';
+        setProgressMessage(`${item.file.name} 처리 중...`);
 
-        if (outputType === 'image/jpeg') {
-          context.fillStyle = '#ffffff';
-          context.fillRect(0, 0, target.width, target.height);
+        let blob: Blob;
+        if (preserveAnimatedGif) {
+          [blob] = await processGifFilters(
+            item.file,
+            [`scale=${target.width}:${target.height}:flags=lanczos`],
+            setProgressMessage,
+          );
+        } else {
+          const image = await loadImage(item.src);
+          canvas.width = target.width;
+          canvas.height = target.height;
+          context.clearRect(0, 0, target.width, target.height);
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = 'high';
+
+          if (outputType === 'image/jpeg') {
+            context.fillStyle = '#ffffff';
+            context.fillRect(0, 0, target.width, target.height);
+          }
+
+          context.drawImage(image, 0, 0, target.width, target.height);
+          blob = await canvasToBlob(
+            canvas,
+            outputType,
+            outputType === 'image/png' ? undefined : quality / 100,
+          );
         }
-
-        context.drawImage(image, 0, 0, target.width, target.height);
-        const blob = await canvasToBlob(
-          canvas,
-          outputType,
-          outputType === 'image/png' ? undefined : quality / 100,
-        );
         const url = URL.createObjectURL(blob);
         resultUrlsRef.current.add(url);
 
@@ -267,6 +283,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
       setErrorMessage('이미지 축소 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
     } finally {
       setIsProcessing(false);
+      setProgressMessage('');
     }
   };
 
@@ -295,7 +312,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const totalOriginalSize = imageItems.reduce((sum, item) => sum + item.file.size, 0);
   const totalResultSize = results.reduce((sum, result) => sum + result.size, 0);
   const isLossyOutput = outputFormat === 'jpeg' || outputFormat === 'webp'
-    || (outputFormat === 'original' && imageItems.some((item) => item.file.type !== 'image/png'));
+    || (outputFormat === 'original' && imageItems.some((item) => item.file.type !== 'image/png' && item.file.type !== 'image/gif'));
 
   return (
     <div className="space-y-8">
@@ -330,13 +347,13 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
             이미지 여러 개 선택
             <input
               type="file"
-              accept="image/jpeg,image/png,image/webp"
+              accept="image/jpeg,image/png,image/webp,image/gif"
               multiple
               onChange={handleFileChange}
               className="hidden"
             />
           </label>
-          <p className="text-[11px] text-gray-500 mt-3">또는 여기에 드래그 · JPG, PNG, WebP</p>
+          <p className="text-[11px] text-gray-500 mt-3">또는 여기에 드래그 · JPG, PNG, WebP, GIF</p>
           {isLoadingImages && <p className="text-xs text-purple-300 mt-4">이미지 불러오는 중...</p>}
           {errorMessage && <p className="text-xs text-red-300 mt-4">{errorMessage}</p>}
         </div>
@@ -523,7 +540,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
                 <div className="rounded-xl bg-green-500/5 border border-green-500/15 p-4">
                   <p className="text-xs text-green-300 leading-relaxed">
-                    원본 비율을 잠가 전체 이미지를 그대로 축소합니다. 중앙 크롭, 가장자리 잘림, 강제 늘림은 적용하지 않습니다.
+                    원본 비율을 잠가 전체 이미지를 그대로 축소합니다. GIF는 원본 형식 유지 선택 시 애니메이션도 유지됩니다.
                   </p>
                 </div>
               </div>
@@ -534,7 +551,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                     <Loader2 className="w-5 h-5 animate-spin" />
                     <span>{progressIndex}/{imageItems.length} 처리 중...</span>
                   </div>
-                  <span className="text-xs text-gray-400">브라우저에서 안전하게 일괄 축소 중</span>
+                  <span className="text-xs text-gray-400 text-center">{progressMessage || '브라우저에서 안전하게 일괄 축소 중'}</span>
                 </div>
               ) : (
                 <button
