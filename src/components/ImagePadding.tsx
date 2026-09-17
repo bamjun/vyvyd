@@ -283,7 +283,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
             <div className="glass-panel-glow rounded-2xl p-6 space-y-6">
               <h3 className="text-lg font-semibold flex items-center space-x-2 border-b border-white/5 pb-3">
                 <Sparkles className="w-5 h-5 text-purple-400" />
-                <span>Image 9:16 Settings</span>
+                <span>9:16 캔버스 설정</span>
               </h3>
 
               <div className="space-y-5">

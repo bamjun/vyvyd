@@ -1,15 +1,14 @@
 import { useState } from 'react';
 import { VideoToGif } from './components/VideoToGif';
 import { GifCropper } from './components/GifCropper';
-import { ImagePadding } from './components/ImagePadding';
-import { ImageResizer } from './components/ImageResizer';
+import { ImageEditor } from './components/ImageEditor';
 import { DiscordWebhookField } from './components/DiscordWebhookField';
 import { DiscordUrlFormatter } from './components/DiscordUrlFormatter';
 import { getDiscordWebhookFromSearch } from './lib/discordWebhook';
-import { Film, Image, ImagePlus, Link2, Minimize2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
+import { Film, Image, Images, Link2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'image' | 'resize' | 'formatter'>('resize');
+  const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'editor' | 'formatter'>('editor');
   const initialDiscordWebhook = getDiscordWebhookFromSearch(window.location.search);
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(initialDiscordWebhook);
   const [sessionConversions, setSessionConversions] = useState<number>(0);
@@ -70,7 +69,7 @@ function App() {
 
         {/* Tab Selection */}
         <div className="flex justify-center">
-          <div className="grid w-full max-w-5xl grid-cols-2 gap-2 rounded-2xl border border-white/5 bg-[#121318] p-1.5 shadow-inner sm:grid-cols-3 xl:grid-cols-5">
+          <div className="grid w-full max-w-4xl grid-cols-2 gap-2 rounded-2xl border border-white/5 bg-[#121318] p-1.5 shadow-inner md:grid-cols-4">
             <button
               onClick={() => setActiveTab('video')}
               className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
@@ -94,26 +93,15 @@ function App() {
               <span>GIF Cropper</span>
             </button>
             <button
-              onClick={() => setActiveTab('image')}
+              onClick={() => setActiveTab('editor')}
               className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
-                activeTab === 'image'
+                activeTab === 'editor'
                   ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
                   : 'text-gray-400 hover:text-gray-200'
               }`}
             >
-              <ImagePlus className="w-4 h-4" />
-              <span>Image 9:16</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('resize')}
-              className={`flex items-center justify-center space-x-2 px-4 md:px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
-                activeTab === 'resize'
-                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
-                  : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              <Minimize2 className="w-4 h-4" />
-              <span>Image Resize</span>
+              <Images className="w-4 h-4" />
+              <span>Image Editor</span>
             </button>
             <button
               onClick={() => setActiveTab('formatter')}
@@ -149,10 +137,8 @@ function App() {
             <VideoToGif onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           ) : activeTab === 'gif' ? (
             <GifCropper onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
-          ) : activeTab === 'image' ? (
-            <ImagePadding onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           ) : (
-            <ImageResizer onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
+            <ImageEditor onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           )}
         </div>
 
