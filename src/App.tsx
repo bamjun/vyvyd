@@ -4,11 +4,12 @@ import { GifCropper } from './components/GifCropper';
 import { ImagePadding } from './components/ImagePadding';
 import { ImageResizer } from './components/ImageResizer';
 import { DiscordWebhookField } from './components/DiscordWebhookField';
+import { DiscordUrlFormatter } from './components/DiscordUrlFormatter';
 import { getDiscordWebhookFromSearch } from './lib/discordWebhook';
-import { Film, Image, ImagePlus, Minimize2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
+import { Film, Image, ImagePlus, Link2, Minimize2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'image' | 'resize'>('resize');
+  const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'image' | 'resize' | 'formatter'>('resize');
   const initialDiscordWebhook = getDiscordWebhookFromSearch(window.location.search);
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(initialDiscordWebhook);
   const [sessionConversions, setSessionConversions] = useState<number>(0);
@@ -69,7 +70,7 @@ function App() {
 
         {/* Tab Selection */}
         <div className="flex justify-center">
-          <div className="bg-[#121318] p-1.5 rounded-2xl grid grid-cols-2 md:grid-cols-4 gap-2 border border-white/5 shadow-inner">
+          <div className="grid w-full max-w-5xl grid-cols-2 gap-2 rounded-2xl border border-white/5 bg-[#121318] p-1.5 shadow-inner sm:grid-cols-3 xl:grid-cols-5">
             <button
               onClick={() => setActiveTab('video')}
               className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
@@ -114,14 +115,27 @@ function App() {
               <Minimize2 className="w-4 h-4" />
               <span>Image Resize</span>
             </button>
+            <button
+              onClick={() => setActiveTab('formatter')}
+              className={`flex items-center justify-center space-x-2 rounded-xl px-4 py-3 text-sm font-medium transition duration-200 ${
+                activeTab === 'formatter'
+                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              <Link2 className="w-4 h-4" />
+              <span>Discord URL</span>
+            </button>
           </div>
         </div>
 
-        <DiscordWebhookField
-          value={discordWebhookUrl}
-          onChange={setDiscordWebhookUrl}
-          loadedFromUrl={initialDiscordWebhook.length > 0}
-        />
+        {activeTab !== 'formatter' && (
+          <DiscordWebhookField
+            value={discordWebhookUrl}
+            onChange={setDiscordWebhookUrl}
+            loadedFromUrl={initialDiscordWebhook.length > 0}
+          />
+        )}
 
         {/* Dynamic Panel Grid */}
         <div className="glass-panel rounded-3xl p-8 shadow-2xl relative overflow-hidden">
@@ -129,7 +143,9 @@ function App() {
           <div className="absolute top-0 right-1/4 w-80 h-80 bg-purple-600/10 rounded-full blur-[100px] pointer-events-none" />
           <div className="absolute bottom-0 left-1/4 w-80 h-80 bg-indigo-600/10 rounded-full blur-[100px] pointer-events-none" />
 
-          {activeTab === 'video' ? (
+          {activeTab === 'formatter' ? (
+            <DiscordUrlFormatter />
+          ) : activeTab === 'video' ? (
             <VideoToGif onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           ) : activeTab === 'gif' ? (
             <GifCropper onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
