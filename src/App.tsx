@@ -3,10 +3,14 @@ import { VideoToGif } from './components/VideoToGif';
 import { GifCropper } from './components/GifCropper';
 import { ImagePadding } from './components/ImagePadding';
 import { ImageResizer } from './components/ImageResizer';
+import { DiscordWebhookField } from './components/DiscordWebhookField';
+import { getDiscordWebhookFromSearch } from './lib/discordWebhook';
 import { Film, Image, ImagePlus, Minimize2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
 function App() {
   const [activeTab, setActiveTab] = useState<'video' | 'gif' | 'image' | 'resize'>('resize');
+  const initialDiscordWebhook = getDiscordWebhookFromSearch(window.location.search);
+  const [discordWebhookUrl, setDiscordWebhookUrl] = useState(initialDiscordWebhook);
   const [sessionConversions, setSessionConversions] = useState<number>(0);
   const [sessionBytesSaved, setSessionBytesSaved] = useState<number>(0);
 
@@ -59,7 +63,7 @@ function App() {
             Convert, Resize & Crop Instantly
           </h2>
           <p className="text-gray-400 text-sm md:text-base">
-            No server upload required. Processing happens 100% on your device, ensuring maximum speed and complete privacy.
+            Processing happens 100% on your device. Results are uploaded only when you choose to send them to Discord.
           </p>
         </div>
 
@@ -113,6 +117,12 @@ function App() {
           </div>
         </div>
 
+        <DiscordWebhookField
+          value={discordWebhookUrl}
+          onChange={setDiscordWebhookUrl}
+          loadedFromUrl={initialDiscordWebhook.length > 0}
+        />
+
         {/* Dynamic Panel Grid */}
         <div className="glass-panel rounded-3xl p-8 shadow-2xl relative overflow-hidden">
           {/* Subtle Ambient Light Effects */}
@@ -120,13 +130,13 @@ function App() {
           <div className="absolute bottom-0 left-1/4 w-80 h-80 bg-indigo-600/10 rounded-full blur-[100px] pointer-events-none" />
 
           {activeTab === 'video' ? (
-            <VideoToGif onSuccess={handleConversionSuccess} />
+            <VideoToGif onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           ) : activeTab === 'gif' ? (
-            <GifCropper onSuccess={handleConversionSuccess} />
+            <GifCropper onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           ) : activeTab === 'image' ? (
-            <ImagePadding onSuccess={handleConversionSuccess} />
+            <ImagePadding onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           ) : (
-            <ImageResizer onSuccess={handleConversionSuccess} />
+            <ImageResizer onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
           )}
         </div>
 
@@ -149,9 +159,9 @@ function App() {
               <ShieldAlert className="w-6 h-6 text-green-400" />
             </div>
             <div>
-              <h4 className="font-semibold text-gray-200 mb-1">100% Private</h4>
+              <h4 className="font-semibold text-gray-200 mb-1">Local by Default</h4>
               <p className="text-xs text-gray-400 leading-relaxed">
-                Your media files never leave your computer. Processing is completed entirely within the local sandbox.
+                Processing stays on your computer. Files leave your device only when you choose to send them to Discord.
               </p>
             </div>
           </div>
@@ -175,7 +185,7 @@ function App() {
       <footer className="border-t border-white/5 py-8 text-center text-xs text-gray-500 bg-[#07080b]">
         <div className="max-w-6xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0">
           <div>
-            © {new Date().getFullYear()} vyvyd. All processing occurs locally.
+            © {new Date().getFullYear()} vyvyd. All processing occurs locally; Discord upload is always optional.
           </div>
           <div className="flex space-x-4">
             <span className="hover:text-gray-400 transition cursor-help">HTML5 Canvas</span>

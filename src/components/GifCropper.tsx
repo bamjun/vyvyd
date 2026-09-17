@@ -1,16 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { formatBytes } from '@/lib/utils';
 import { fetchFile } from '@ffmpeg/util';
-import { Image as ImageIcon, Download, Sparkles, AlertCircle, RefreshCw, Loader2 } from 'lucide-react';
+import { Image as ImageIcon, Download, Sparkles, AlertCircle, RefreshCw, Loader2, Send } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { CropOverlay } from './CropOverlay';
+import { DiscordSendStatus } from './DiscordSendStatus';
 import ffmpeg, { loadFFmpeg as initFFmpeg } from '@/lib/ffmpeg';
+import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 
 interface GifCropperProps {
   onSuccess: (size: number) => void;
+  discordWebhookUrl: string;
 }
 
-export const GifCropper: React.FC<GifCropperProps> = ({ onSuccess }) => {
+export const GifCropper: React.FC<GifCropperProps> = ({ onSuccess, discordWebhookUrl }) => {
   const [gifFile, setGifFile] = useState<File | null>(null);
   const [gifSrc, setGifSrc] = useState<string>('');
   const [gifWidth, setGifWidth] = useState<number>(0);
@@ -30,6 +33,7 @@ export const GifCropper: React.FC<GifCropperProps> = ({ onSuccess }) => {
   const [crop, setCrop] = useState({ x: 0, y: 0, width: 0, height: 0 });
 
   const imageRef = useRef<HTMLImageElement>(null);
+  const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
 
   // Cleanup Object URL on unmount
   useEffect(() => {
@@ -152,6 +156,14 @@ export const GifCropper: React.FC<GifCropperProps> = ({ onSuccess }) => {
       width: gifWidth,
       height: gifHeight,
     });
+  };
+
+  const sendResultToDiscord = () => {
+    if (!gifResult) return;
+    void sendToDiscord('cropped-gif', [{
+      url: gifResult,
+      name: `cropped_${gifFile?.name || 'result.gif'}`,
+    }]);
   };
 
   return (
@@ -291,14 +303,28 @@ export const GifCropper: React.FC<GifCropperProps> = ({ onSuccess }) => {
                 <div className="rounded-xl overflow-hidden bg-black/40 p-2 flex justify-center border border-white/5 max-h-[300px]">
                   <img src={gifResult} alt="Cropped GIF" className="max-h-[280px] object-contain rounded" />
                 </div>
-                <a
-                  href={gifResult}
-                  download={`cropped_${gifFile?.name || 'result.gif'}`}
-                  className="w-full py-3.5 bg-green-600 hover:bg-green-500 font-medium rounded-xl text-center flex items-center justify-center space-x-2 shadow-lg shadow-green-500/10 hover:shadow-green-500/20 transition"
-                >
-                  <Download className="w-5 h-5" />
-                  <span>Download GIF</span>
-                </a>
+                <DiscordSendStatus status={discordStatus} />
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <a
+                    href={gifResult}
+                    download={`cropped_${gifFile?.name || 'result.gif'}`}
+                    className="w-full py-3.5 bg-green-600 hover:bg-green-500 font-medium rounded-xl text-center flex items-center justify-center space-x-2 shadow-lg shadow-green-500/10 hover:shadow-green-500/20 transition"
+                  >
+                    <Download className="w-5 h-5" />
+                    <span>Download GIF</span>
+                  </a>
+                  <button
+                    type="button"
+                    onClick={sendResultToDiscord}
+                    disabled={activeRequestId !== null}
+                    className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 font-medium rounded-xl text-center flex items-center justify-center space-x-2 shadow-lg shadow-indigo-500/10 hover:shadow-indigo-500/20 transition disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {activeRequestId === 'cropped-gif'
+                      ? <Loader2 className="w-5 h-5 animate-spin" />
+                      : <Send className="w-5 h-5" />}
+                    <span>Discord로 보내기</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>

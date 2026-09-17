@@ -1,13 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { formatBytes } from '@/lib/utils';
 import { fetchFile } from '@ffmpeg/util';
-import { Film, Download, Sparkles, AlertCircle, RefreshCw, Loader2 } from 'lucide-react';
+import { Film, Download, DownloadCloud, Sparkles, AlertCircle, RefreshCw, Loader2, Send } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { CropOverlay } from './CropOverlay';
+import { DiscordSendStatus } from './DiscordSendStatus';
 import ffmpeg, { loadFFmpeg as initFFmpeg } from '@/lib/ffmpeg';
+import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 
 interface VideoToGifProps {
   onSuccess: (size: number) => void;
+  discordWebhookUrl: string;
 }
 
 interface VideoItem {
@@ -48,7 +51,7 @@ const loadVideoMetadata = (src: string): Promise<HTMLVideoElement> =>
 const getGifFileName = (fileName: string) =>
   `${fileName.replace(/\.[^.]+$/, '') || 'converted'}.gif`;
 
-export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess }) => {
+export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhookUrl }) => {
   const [videoItems, setVideoItems] = useState<VideoItem[]>([]);
   const [startTime, setStartTime] = useState<number>(0);
   const [endTime, setEndTime] = useState<number>(0);
@@ -69,6 +72,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const inputUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
+  const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
 
   useEffect(() => {
     return () => {
@@ -317,6 +321,28 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess }) => {
       setIsProcessing(false);
       setProgressMsg('');
     }
+  };
+
+  const downloadAll = () => {
+    results.forEach((result) => {
+      const link = document.createElement('a');
+      link.href = result.url;
+      link.download = getGifFileName(result.fileName);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    });
+  };
+
+  const sendResultToDiscord = (result: GifResult) => {
+    void sendToDiscord(result.id, [{ url: result.url, name: getGifFileName(result.fileName) }]);
+  };
+
+  const sendAllToDiscord = () => {
+    void sendToDiscord('all', results.map((result) => ({
+      url: result.url,
+      name: getGifFileName(result.fileName),
+    })));
   };
 
   const firstVideo = videoItems[0];
@@ -611,12 +637,34 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess }) => {
 
             {results.length > 0 && (
               <div className="glass-panel rounded-2xl p-6 space-y-4 border border-green-500/20">
-                <div className="flex justify-between items-center">
+                <div className="flex flex-wrap justify-between items-center gap-3">
                   <span className="text-sm font-semibold text-green-400 flex items-center space-x-1.5">
                     <AlertCircle className="w-4 h-4" />
                     <span>{results.length}/{videoItems.length} GIF Ready!</span>
                   </span>
+                  {results.length > 1 && (
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={downloadAll}
+                        className="flex items-center gap-1.5 rounded-lg bg-green-600 hover:bg-green-500 px-3 py-2 text-xs font-medium transition"
+                      >
+                        <DownloadCloud className="w-4 h-4" />
+                        모두 다운로드
+                      </button>
+                      <button
+                        type="button"
+                        onClick={sendAllToDiscord}
+                        disabled={activeRequestId !== null}
+                        className="flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 px-3 py-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {activeRequestId === 'all' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                        모두 Discord로 보내기
+                      </button>
+                    </div>
+                  )}
                 </div>
+                <DiscordSendStatus status={discordStatus} />
                 <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
                   {results.map((result) => (
                     <div key={result.id} className="flex items-center gap-3 rounded-xl bg-black/30 border border-white/5 p-2">
@@ -625,15 +673,29 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess }) => {
                         <p className="text-xs text-gray-300 truncate" title={result.fileName}>{result.fileName}</p>
                         <p className="text-[10px] text-gray-500">{result.width} × {result.height}px · {formatBytes(result.size)}</p>
                       </div>
-                      <a
-                        href={result.url}
-                        download={getGifFileName(result.fileName)}
-                        className="shrink-0 p-2 rounded-lg bg-green-600 hover:bg-green-500 transition"
-                        aria-label={`${result.fileName} GIF 다운로드`}
-                        title="Download GIF"
-                      >
-                        <Download className="w-4 h-4" />
-                      </a>
+                      <div className="flex shrink-0 gap-2">
+                        <a
+                          href={result.url}
+                          download={getGifFileName(result.fileName)}
+                          className="p-2 rounded-lg bg-green-600 hover:bg-green-500 transition"
+                          aria-label={`${result.fileName} GIF 다운로드`}
+                          title="Download GIF"
+                        >
+                          <Download className="w-4 h-4" />
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => sendResultToDiscord(result)}
+                          disabled={activeRequestId !== null}
+                          className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 transition disabled:cursor-not-allowed disabled:opacity-50"
+                          aria-label={`${result.fileName} GIF Discord로 보내기`}
+                          title="Discord로 보내기"
+                        >
+                          {activeRequestId === result.id
+                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                            : <Send className="w-4 h-4" />}
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
