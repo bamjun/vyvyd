@@ -61,7 +61,7 @@ function App() {
         {/* Visual Hero Tagline */}
         <div className="text-center max-w-2xl mx-auto space-y-4">
           <h2 className="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-b from-white to-gray-400 bg-clip-text text-transparent">
-            Convert, Resize & Crop Instantly
+            Convert, Resize, Crop & Merge
           </h2>
           <p className="text-gray-400 text-sm md:text-base">
             Processing happens 100% on your device. Results are uploaded only when you choose to send them to Discord.
