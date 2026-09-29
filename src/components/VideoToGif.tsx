@@ -1,16 +1,21 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { formatBytes } from '@/lib/utils';
 import { fetchFile } from '@ffmpeg/util';
+import type { FFmpeg } from '@ffmpeg/ffmpeg';
 import { Film, Download, DownloadCloud, Sparkles, AlertCircle, RefreshCw, Loader2, Send } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { CropOverlay } from './CropOverlay';
 import { DiscordSendStatus } from './DiscordSendStatus';
-import ffmpeg, { loadFFmpeg as initFFmpeg } from '@/lib/ffmpeg';
+import { runFFmpegJob } from '@/lib/ffmpeg';
+import { isAbortError, throwIfAborted } from '@/lib/cancellation';
+import { useProcessingTask } from '@/hooks/useProcessingTask';
+import { CancelProcessingButton } from './CancelProcessingButton';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 
 interface VideoToGifProps {
   onSuccess: (size: number) => void;
   discordWebhookUrl: string;
+  isActive: boolean;
 }
 
 interface VideoItem {
@@ -51,7 +56,7 @@ const loadVideoMetadata = (src: string): Promise<HTMLVideoElement> =>
 const getGifFileName = (fileName: string) =>
   `${fileName.replace(/\.[^.]+$/, '') || 'converted'}.gif`;
 
-export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhookUrl }) => {
+export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhookUrl, isActive }) => {
   const [videoItems, setVideoItems] = useState<VideoItem[]>([]);
   const [startTime, setStartTime] = useState<number>(0);
   const [endTime, setEndTime] = useState<number>(0);
@@ -60,7 +65,6 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const [dither, setDither] = useState<string>('bayer');
   const [outputWidth, setOutputWidth] = useState<string>('');
   const [outputHeight, setOutputHeight] = useState<string>('');
-  const [isWasmLoading, setIsWasmLoading] = useState<boolean>(false);
   const [isLoadingVideos, setIsLoadingVideos] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [progressMsg, setProgressMsg] = useState<string>('');
@@ -72,7 +76,12 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const videoRef = useRef<HTMLVideoElement>(null);
   const inputUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
+  const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
+
+  useEffect(() => {
+    if (!isActive) videoRef.current?.pause();
+  }, [isActive]);
 
   useEffect(() => {
     return () => {
@@ -84,25 +93,6 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const clearUrls = (urls: Set<string>) => {
     urls.forEach((url) => URL.revokeObjectURL(url));
     urls.clear();
-  };
-
-  const loadFFmpeg = async () => {
-    if (ffmpeg.loaded) return;
-
-    setIsWasmLoading(true);
-    setProgressMsg('Loading FFmpeg WebAssembly...');
-    try {
-      await initFFmpeg(
-        (msg) => setProgressMsg(msg),
-        () => {},
-      );
-    } catch (error: unknown) {
-      console.error('Failed to load FFmpeg WASM', error);
-      const message = error instanceof Error ? error.message : String(error);
-      alert(`Failed to load FFmpeg: ${message}. Please ensure the Vite server was restarted to apply Cross-Origin Isolation headers.`);
-    } finally {
-      setIsWasmLoading(false);
-    }
   };
 
   const reset = () => {
@@ -155,7 +145,6 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
       setCrop({ x: 0, y: 0, width: firstVideo.width, height: firstVideo.height });
       setOutputWidth(String(Math.max(1, Math.round(firstVideo.width * scale))));
       setOutputHeight(String(Math.max(1, Math.round(firstVideo.height * scale))));
-      await loadFFmpeg();
     } catch (error: unknown) {
       console.error(error);
       clearUrls(inputUrlsRef.current);
@@ -178,6 +167,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   const handleCropChange = (nextCrop: CropArea) => {
+    if (isProcessing) return;
     setCrop(nextCrop);
     setOutputWidth(String(Math.max(1, Math.round(nextCrop.width * scale))));
     setOutputHeight(String(Math.max(1, Math.round(nextCrop.height * scale))));
@@ -205,7 +195,8 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
     handleCropChange(next);
   };
 
-  const safeDelete = async (fileName: string) => {
+  const safeDelete = async (ffmpeg: FFmpeg, fileName: string) => {
+    if (!ffmpeg.loaded) return;
     try {
       await ffmpeg.deleteFile(fileName);
     } catch {
@@ -234,13 +225,12 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
       return;
     }
 
-    if (!ffmpeg.loaded) {
-      await loadFFmpeg();
-    }
-    if (!ffmpeg.loaded) return;
+    const signal = beginTask();
+    if (!signal) return;
 
     setIsProcessing(true);
     setProgressIndex(0);
+    setProgressMsg('변환 작업 대기 중...');
     setResults([]);
     clearUrls(resultUrlsRef.current);
     setErrorMessage('');
@@ -248,78 +238,93 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
     const nextResults: GifResult[] = [];
 
     try {
-      for (let index = 0; index < videoItems.length; index += 1) {
-        const item = videoItems[index];
-        const inputName = `input-${index}.mp4`;
-        const paletteName = `palette-${index}.png`;
-        const outputName = `output-${index}.gif`;
-        const effectiveStart = Math.max(0, Math.min(startTime, Math.max(0, item.duration - 0.1)));
-        const effectiveEnd = Math.min(Math.max(effectiveStart + 0.1, endTime), item.duration);
-        const duration = Math.max(0.1, effectiveEnd - effectiveStart);
-        const itemCrop = getCropForVideo(item);
-        const cropFilter = `crop=${itemCrop.width}:${itemCrop.height}:${itemCrop.x}:${itemCrop.y}`;
-        const filterString = `${cropFilter},scale=${targetWidth}:${targetHeight}:flags=lanczos,fps=${fps}`;
-        const ditherConfig = dither === 'none' ? 'dither=none' : `dither=${dither}`;
+      await runFFmpegJob(async (ffmpeg) => {
+        for (let index = 0; index < videoItems.length; index += 1) {
+          throwIfAborted(signal);
+          const item = videoItems[index];
+          const inputName = `input-${index}.mp4`;
+          const paletteName = `palette-${index}.png`;
+          const outputName = `output-${index}.gif`;
+          const effectiveStart = Math.max(0, Math.min(startTime, Math.max(0, item.duration - 0.1)));
+          const effectiveEnd = Math.min(Math.max(effectiveStart + 0.1, endTime), item.duration);
+          const duration = Math.max(0.1, effectiveEnd - effectiveStart);
+          const itemCrop = getCropForVideo(item);
+          const cropFilter = `crop=${itemCrop.width}:${itemCrop.height}:${itemCrop.x}:${itemCrop.y}`;
+          const filterString = `${cropFilter},scale=${targetWidth}:${targetHeight}:flags=lanczos,fps=${fps}`;
+          const ditherConfig = dither === 'none' ? 'dither=none' : `dither=${dither}`;
 
-        setProgressIndex(index + 1);
-        setProgressMsg(`${index + 1}/${videoItems.length} 파일 변환 중...`);
+          setProgressIndex(index + 1);
+          setProgressMsg(`${index + 1}/${videoItems.length} 파일 변환 중...`);
 
-        try {
-          setProgressMsg(`${index + 1}/${videoItems.length} 파일 읽는 중...`);
-          const videoData = await fetchFile(item.file);
-          await ffmpeg.writeFile(inputName, videoData);
+          try {
+            setProgressMsg(`${index + 1}/${videoItems.length} 파일 읽는 중...`);
+            const videoData = await fetchFile(item.file);
+            throwIfAborted(signal);
+            await ffmpeg.writeFile(inputName, videoData);
+            throwIfAborted(signal);
 
-          setProgressMsg(`${index + 1}/${videoItems.length} 색상 팔레트 생성 중...`);
-          await ffmpeg.exec([
-            '-y',
-            '-ss', effectiveStart.toString(),
-            '-t', duration.toString(),
-            '-i', inputName,
-            '-vf', `${filterString},palettegen=stats_mode=diff`,
-            paletteName,
-          ]);
+            setProgressMsg(`${index + 1}/${videoItems.length} 색상 팔레트 생성 중...`);
+            await ffmpeg.exec([
+              '-y',
+              '-ss', effectiveStart.toString(),
+              '-t', duration.toString(),
+              '-i', inputName,
+              '-vf', `${filterString},palettegen=stats_mode=diff`,
+              paletteName,
+            ]);
+            throwIfAborted(signal);
 
-          setProgressMsg(`${index + 1}/${videoItems.length} GIF 렌더링 중...`);
-          await ffmpeg.exec([
-            '-y',
-            '-ss', effectiveStart.toString(),
-            '-t', duration.toString(),
-            '-i', inputName,
-            '-i', paletteName,
-            '-filter_complex', `[0:v]${filterString}[v];[v][1:v]paletteuse=${ditherConfig}`,
-            outputName,
-          ]);
+            setProgressMsg(`${index + 1}/${videoItems.length} GIF 렌더링 중...`);
+            await ffmpeg.exec([
+              '-y',
+              '-ss', effectiveStart.toString(),
+              '-t', duration.toString(),
+              '-i', inputName,
+              '-i', paletteName,
+              '-filter_complex', `[0:v]${filterString}[v];[v][1:v]paletteuse=${ditherConfig}`,
+              outputName,
+            ]);
+            throwIfAborted(signal);
 
-          const data = await ffmpeg.readFile(outputName);
-          const gifBlob = new Blob([data as BlobPart], { type: 'image/gif' });
-          const url = URL.createObjectURL(gifBlob);
-          resultUrlsRef.current.add(url);
+            const data = await ffmpeg.readFile(outputName);
+            throwIfAborted(signal);
+            const gifBlob = new Blob([data as BlobPart], { type: 'image/gif' });
+            const url = URL.createObjectURL(gifBlob);
+            resultUrlsRef.current.add(url);
 
-          const result: GifResult = {
-            id: item.id,
-            fileName: item.file.name,
-            url,
-            size: gifBlob.size,
-            width: targetWidth,
-            height: targetHeight,
-          };
-          nextResults.push(result);
-          setResults([...nextResults]);
-          onSuccess(gifBlob.size);
-        } finally {
-          await safeDelete(inputName);
-          await safeDelete(paletteName);
-          await safeDelete(outputName);
+            const result: GifResult = {
+              id: item.id,
+              fileName: item.file.name,
+              url,
+              size: gifBlob.size,
+              width: targetWidth,
+              height: targetHeight,
+            };
+            nextResults.push(result);
+            setResults([...nextResults]);
+            onSuccess(gifBlob.size);
+          } finally {
+            await safeDelete(ffmpeg, inputName);
+            await safeDelete(ffmpeg, paletteName);
+            await safeDelete(ffmpeg, outputName);
+          }
         }
-      }
+      }, signal, setProgressMsg);
 
+      throwIfAborted(signal);
       confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
-    } catch (error) {
-      console.error(error);
-      setErrorMessage('GIF 변환 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
-    } finally {
-      setIsProcessing(false);
       setProgressMsg('');
+    } catch (error) {
+      if (isAbortError(error) || signal.aborted) {
+        setProgressMsg('변환을 취소했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      } else {
+        console.error(error);
+        setProgressMsg('');
+        setErrorMessage('GIF 변환 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      }
+    } finally {
+      finishTask();
+      setIsProcessing(false);
     }
   };
 
@@ -411,7 +416,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                     controls
                     playsInline
                   />
-                  {firstVideo.width > 0 && (
+                  {firstVideo.width > 0 && !isProcessing && (
                     <CropOverlay
                       mediaWidth={firstVideo.width}
                       mediaHeight={firstVideo.height}
@@ -425,7 +430,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                   <span>Original size: {firstVideo.width}x{firstVideo.height}</span>
                   <span>Crop: X:{crop.x}, Y:{crop.y}, {crop.width}x{crop.height}</span>
                 </div>
-                <button onClick={resetCrop} className="text-xs text-purple-400 hover:text-purple-300 flex items-center space-x-1">
+                <button onClick={resetCrop} disabled={isProcessing} className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50 flex items-center space-x-1">
                   <RefreshCw className="w-3 h-3" />
                   <span>Reset Crop & Output Size</span>
                 </button>
@@ -440,7 +445,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                 <span>Conversion Settings (FFmpeg)</span>
               </h3>
 
-              <div className="space-y-5">
+              <fieldset disabled={isProcessing} className="space-y-5 disabled:opacity-60">
                 <div>
                   <label className="block text-xs font-semibold uppercase text-gray-400 mb-2">Trim Duration</label>
                   <div className="grid grid-cols-2 gap-4">
@@ -608,20 +613,16 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                     <option value="none">None (Sharp)</option>
                   </select>
                 </div>
-              </div>
+              </fieldset>
 
-              {isWasmLoading ? (
-                <div className="w-full py-4 bg-[#121318] border border-white/10 rounded-xl flex items-center justify-center space-x-3 text-purple-400 font-medium">
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Loading FFmpeg WebAssembly...</span>
-                </div>
-              ) : isProcessing ? (
+              {isProcessing ? (
                 <div className="w-full py-4 bg-[#121318] border border-white/10 rounded-xl flex flex-col items-center justify-center space-y-2 text-purple-400 font-medium">
                   <div className="flex items-center space-x-3">
                     <Loader2 className="w-5 h-5 animate-spin" />
                     <span>Processing {progressIndex}/{videoItems.length}</span>
                   </div>
                   <span className="text-xs text-gray-400 text-center">{progressMsg}</span>
+                  <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />
                 </div>
               ) : (
                 <button
@@ -701,6 +702,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                 </div>
               </div>
             )}
+            {!isProcessing && progressMsg && <p role="status" className="text-xs text-gray-400">{progressMsg}</p>}
             {errorMessage && <p className="text-xs text-red-300">{errorMessage}</p>}
           </div>
         </div>

@@ -5,6 +5,9 @@ import { formatBytes } from '@/lib/utils';
 import { DiscordSendStatus } from './DiscordSendStatus';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { processGifFilters } from '@/lib/gifProcessing';
+import { useProcessingTask } from '@/hooks/useProcessingTask';
+import { isAbortError, throwIfAborted } from '@/lib/cancellation';
+import { CancelProcessingButton } from './CancelProcessingButton';
 
 interface ImagePaddingProps {
   onSuccess: (size: number) => void;
@@ -73,6 +76,8 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   const [progressMessage, setProgressMessage] = useState('');
   const [results, setResults] = useState<ImageResult[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
+  const [cancellationMessage, setCancellationMessage] = useState('');
+  const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const imageUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -99,6 +104,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
     setProgressIndex(0);
     setProgressMessage('');
     setErrorMessage('');
+    setCancellationMessage('');
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -148,7 +154,10 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
     const canvas = canvasRef.current;
     if (!canvas || imageItems.length === 0 || isProcessing) return;
 
+    const signal = beginTask();
+    if (!signal) return;
     setIsProcessing(true);
+    setCancellationMessage('');
     setProgressIndex(0);
     setResults([]);
     clearUrls(resultUrlsRef.current);
@@ -161,6 +170,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
       if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
 
       for (let index = 0; index < imageItems.length; index += 1) {
+        throwIfAborted(signal);
         const item = imageItems[index];
         setProgressIndex(index + 1);
         setProgressMessage(`${item.file.name} 처리 중...`);
@@ -174,9 +184,11 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
             item.file,
             [`pad=${item.width}:${item.outputHeight}:0:0:color=${paddingColor}`],
             setProgressMessage,
+            signal,
           );
         } else {
           const image = await loadImage(item.src);
+          throwIfAborted(signal);
           canvas.width = item.width;
           canvas.height = item.outputHeight;
           context.clearRect(0, 0, canvas.width, canvas.height);
@@ -190,6 +202,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
           blob = await canvasToBlob(canvas);
         }
 
+        throwIfAborted(signal);
         const url = URL.createObjectURL(blob);
         resultUrlsRef.current.add(url);
 
@@ -207,13 +220,19 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
         onSuccess(blob.size);
       }
 
+      throwIfAborted(signal);
       confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
     } catch (error) {
-      console.error(error);
-      setErrorMessage('이미지 변환 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      if (signal.aborted || isAbortError(error)) {
+        setCancellationMessage('작업을 취소했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      } else {
+        console.error(error);
+        setErrorMessage('이미지 변환 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      }
     } finally {
       setIsProcessing(false);
       setProgressMessage('');
+      finishTask();
     }
   };
 
@@ -361,6 +380,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                     <span>Creating {progressIndex}/{imageItems.length}...</span>
                   </div>
                   <span className="text-xs text-gray-400 text-center">{progressMessage || '브라우저에서 순차 처리 중'}</span>
+                  <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />
                 </div>
               ) : (
                 <button
@@ -372,6 +392,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                   <span>Make {imageItems.length} Image{imageItems.length > 1 ? 's' : ''}</span>
                 </button>
               )}
+              {cancellationMessage && <p role="status" className="text-xs text-gray-400">{cancellationMessage}</p>}
             </div>
 
             {results.length > 0 && (

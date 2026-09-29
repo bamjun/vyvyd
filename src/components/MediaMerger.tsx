@@ -20,6 +20,9 @@ import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { formatBytes } from '@/lib/utils';
 import { getMergeLayout, mergeMedia, validateMergeFile } from '@/lib/mediaMerger';
 import type { MergeDirection, MergeMode, MergeSource } from '@/lib/mediaMerger';
+import { useProcessingTask } from '@/hooks/useProcessingTask';
+import { isAbortError, throwIfAborted } from '@/lib/cancellation';
+import { CancelProcessingButton } from './CancelProcessingButton';
 
 interface MediaMergerProps {
   onSuccess: (size: number) => void;
@@ -69,6 +72,8 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
   const [isDragging, setIsDragging] = useState(false);
   const [progressMessage, setProgressMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [cancellationMessage, setCancellationMessage] = useState('');
+  const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const [sentResultId, setSentResultId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputUrlsRef = useRef(new Set<string>());
@@ -110,6 +115,7 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
     setResult(null);
     setSentResultId(null);
     setProgressMessage('');
+    setCancellationMessage('');
   };
 
   const reset = () => {
@@ -202,6 +208,8 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
 
   const merge = async () => {
     if (sources.length < 2 || !layout || operationRef.current || busy) return;
+    const signal = beginTask();
+    if (!signal) return;
     operationRef.current = true;
     setIsProcessing(true);
     clearResult();
@@ -211,9 +219,11 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
     const isCurrent = () => mountedRef.current && generation === generationRef.current;
 
     try {
+      throwIfAborted(signal);
       const blob = await mergeMedia(sources, mode, direction, (message) => {
-        if (isCurrent()) setProgressMessage(message);
-      });
+        if (isCurrent() && !signal.aborted) setProgressMessage(message);
+      }, signal);
+      throwIfAborted(signal);
       if (!isCurrent()) return;
       const url = URL.createObjectURL(blob);
       resultUrlRef.current = url;
@@ -227,8 +237,15 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
       });
       onSuccess(blob.size);
     } catch (error) {
-      if (isCurrent()) setErrorMessage(error instanceof Error ? error.message : '파일을 합치는 중 오류가 발생했습니다.');
+      if (isCurrent()) {
+        if (signal.aborted || isAbortError(error)) {
+          setCancellationMessage('작업을 취소했습니다. 선택한 파일과 설정을 유지했습니다.');
+        } else {
+          setErrorMessage(error instanceof Error ? error.message : '파일을 합치는 중 오류가 발생했습니다.');
+        }
+      }
     } finally {
+      finishTask();
       if (isCurrent()) {
         setIsProcessing(false);
         setProgressMessage('');
@@ -397,6 +414,8 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
                 {isProcessing ? '합치는 중...' : sources.length < 2 ? '파일을 2개 이상 선택해 주세요' : `${sources.length}개 ${mediaLabel} 합치기`}
               </button>
               {isProcessing && <p role="status" className="text-center text-xs text-purple-300">{progressMessage}</p>}
+              {isProcessing && <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />}
+              {cancellationMessage && <p role="status" className="text-center text-xs text-gray-400">{cancellationMessage}</p>}
               <p className="text-center text-[11px] text-gray-500">{mode === 'gif' ? '애니메이션 GIF' : '투명 배경 PNG'}로 저장됩니다.</p>
             </div>
 

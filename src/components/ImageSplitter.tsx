@@ -16,6 +16,9 @@ import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { formatBytes } from '@/lib/utils';
 import { getImageSlices, ImageSlice } from '@/lib/imageSplitter';
 import { processGifFilters } from '@/lib/gifProcessing';
+import { useProcessingTask } from '@/hooks/useProcessingTask';
+import { isAbortError, throwIfAborted } from '@/lib/cancellation';
+import { CancelProcessingButton } from './CancelProcessingButton';
 
 interface ImageSplitterProps {
   onSuccess: (size: number) => void;
@@ -95,6 +98,8 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   const [completedParts, setCompletedParts] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [cancellationMessage, setCancellationMessage] = useState('');
+  const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const inputUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -117,6 +122,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
     setResults([]);
     setCompletedParts(0);
     setProgressMessage('');
+    setCancellationMessage('');
   };
 
   const reset = () => {
@@ -197,6 +203,8 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
       return;
     }
 
+    const signal = beginTask();
+    if (!signal) return;
     setIsProcessing(true);
     clearResults();
     setErrorMessage('');
@@ -204,6 +212,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
     const context = canvas.getContext('2d');
 
     const addResult = (source: SourceImage, slice: ImageSlice, blob: Blob, outputType: string) => {
+      throwIfAborted(signal);
       const url = URL.createObjectURL(blob);
       resultUrlsRef.current.add(url);
       const result: SplitResult = {
@@ -235,6 +244,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
       if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
 
       for (const source of images) {
+        throwIfAborted(signal);
         const slices = getImageSlices(source.width, source.height, columns, rows);
         const outputType = SUPPORTED_TYPES.has(source.file.type) ? source.file.type : 'image/png';
 
@@ -243,15 +253,19 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
             source.file,
             slices.map((slice) => `crop=${slice.width}:${slice.height}:${slice.x}:${slice.y}`),
             setProgressMessage,
+            signal,
           );
 
+          throwIfAborted(signal);
           blobs.forEach((blob, index) => addResult(source, slices[index], blob, outputType));
           continue;
         }
 
         const image = await loadImage(source.url);
+        throwIfAborted(signal);
 
         for (const slice of slices) {
+          throwIfAborted(signal);
           setProgressMessage(`${source.file.name} 조각 ${nextResults.length + 1}/${totalParts} 처리 중...`);
           canvas.width = slice.width;
           canvas.height = slice.height;
@@ -272,13 +286,19 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
         }
       }
 
+      throwIfAborted(signal);
       confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
     } catch (error) {
-      console.error(error);
-      setErrorMessage('이미지를 자르는 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      if (signal.aborted || isAbortError(error)) {
+        setCancellationMessage('작업을 취소했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      } else {
+        console.error(error);
+        setErrorMessage('이미지를 자르는 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      }
     } finally {
       setIsProcessing(false);
       setProgressMessage('');
+      finishTask();
     }
   };
 
@@ -443,6 +463,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                     <span>{completedParts}/{totalParts} 자르는 중...</span>
                   </div>
                   <span className="px-3 text-center text-xs text-gray-400">{progressMessage || '브라우저에서 순차 처리 중'}</span>
+                  <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />
                 </div>
               ) : (
                 <button
@@ -454,6 +475,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                   {totalParts}개 이미지 조각 만들기
                 </button>
               )}
+              {cancellationMessage && <p role="status" className="text-xs text-gray-400">{cancellationMessage}</p>}
             </div>
 
             {results.length > 0 && (

@@ -1,4 +1,5 @@
 import { mergeGifFiles } from '@/lib/gifProcessing';
+import { throwIfAborted } from '@/lib/cancellation';
 
 export type MergeMode = 'image' | 'gif';
 export type MergeDirection = 'horizontal' | 'vertical';
@@ -76,10 +77,22 @@ export const validateMergeFile = async (file: File, mode: MergeMode): Promise<vo
   }
 };
 
-const loadImage = (source: MergeSource) => new Promise<HTMLImageElement>((resolve, reject) => {
+const loadImage = (source: MergeSource, signal?: AbortSignal) => new Promise<HTMLImageElement>((resolve, reject) => {
+  throwIfAborted(signal);
   const image = new Image();
-  image.onload = () => resolve(image);
-  image.onerror = () => reject(new Error(`${source.file.name}: 이미지를 읽을 수 없습니다.`));
+  const cleanup = () => {
+    image.onload = null;
+    image.onerror = null;
+    signal?.removeEventListener('abort', onAbort);
+  };
+  const onAbort = () => {
+    cleanup();
+    image.src = '';
+    reject(new DOMException('작업을 취소했습니다.', 'AbortError'));
+  };
+  image.onload = () => { cleanup(); resolve(image); };
+  image.onerror = () => { cleanup(); reject(new Error(`${source.file.name}: 이미지를 읽을 수 없습니다.`)); };
+  signal?.addEventListener('abort', onAbort, { once: true });
   image.src = source.url;
 });
 
@@ -88,16 +101,19 @@ export const mergeMedia = async (
   mode: MergeMode,
   direction: MergeDirection,
   onProgress?: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> => {
+  throwIfAborted(signal);
   if (sources.length < 2) {
     throw new Error('합칠 파일을 2개 이상 추가해 주세요.');
   }
 
   const layout = getMergeLayout(sources, direction);
   await Promise.all(sources.map((source) => validateMergeFile(source.file, mode)));
+  throwIfAborted(signal);
 
   if (mode === 'gif') {
-    return mergeGifFiles(sources.map((source) => source.file), layout.items, onProgress);
+    return mergeGifFiles(sources.map((source) => source.file), layout.items, onProgress, signal);
   }
 
   const canvas = document.createElement('canvas');
@@ -110,8 +126,10 @@ export const mergeMedia = async (
 
     // Decode and draw one source at a time to avoid retaining every decoded image.
     for (let index = 0; index < sources.length; index += 1) {
+      throwIfAborted(signal);
       onProgress?.(`이미지 합치는 중 ${index + 1}/${sources.length}`);
-      const image = await loadImage(sources[index]);
+      const image = await loadImage(sources[index], signal);
+      throwIfAborted(signal);
       const item = layout.items[index];
       if (image.naturalWidth !== item.width || image.naturalHeight !== item.height) {
         throw new Error('이미지 크기가 변경되었습니다. 파일을 다시 추가해 주세요.');
@@ -120,12 +138,17 @@ export const mergeMedia = async (
     }
 
     onProgress?.('PNG 파일을 만드는 중...');
-    return await new Promise<Blob>((resolve, reject) => {
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      const onAbort = () => reject(new DOMException('작업을 취소했습니다.', 'AbortError'));
+      signal?.addEventListener('abort', onAbort, { once: true });
       canvas.toBlob((blob) => {
+        signal?.removeEventListener('abort', onAbort);
         if (blob) resolve(blob);
         else reject(new Error('이미지를 저장할 수 없습니다. 파일 수나 크기를 줄여 주세요.'));
       }, 'image/png');
     });
+    throwIfAborted(signal);
+    return blob;
   } finally {
     canvas.width = 0;
     canvas.height = 0;

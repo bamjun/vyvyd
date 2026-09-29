@@ -17,6 +17,9 @@ import { processGifFilters } from '@/lib/gifProcessing';
 import { formatBytes } from '@/lib/utils';
 import { CropOverlay } from './CropOverlay';
 import { DiscordSendStatus } from './DiscordSendStatus';
+import { useProcessingTask } from '@/hooks/useProcessingTask';
+import { isAbortError, throwIfAborted } from '@/lib/cancellation';
+import { CancelProcessingButton } from './CancelProcessingButton';
 
 interface ImageCropperProps {
   onSuccess: (size: number) => void;
@@ -125,6 +128,8 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressMessage, setProgressMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [cancellationMessage, setCancellationMessage] = useState('');
+  const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
 
   const imageRef = useRef<HTMLImageElement>(null);
   const sourceUrlRef = useRef('');
@@ -145,6 +150,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   }, []);
 
   const selectFile = async (file: File) => {
+    if (isProcessing) return;
     const format = getImageFormat(file);
     if (!format) {
       setErrorMessage('JPG, PNG, WebP 또는 GIF 파일을 선택해 주세요.');
@@ -152,6 +158,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
     }
 
     setErrorMessage('');
+    setCancellationMessage('');
     const nextUrl = URL.createObjectURL(file);
 
     try {
@@ -179,16 +186,21 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   };
 
   const resetCrop = () => {
+    if (isProcessing) return;
     clearResult();
+    setCancellationMessage('');
     setCrop({ x: 0, y: 0, width: sourceWidth, height: sourceHeight });
   };
 
   const updateCrop = (nextCrop: CropRect) => {
+    if (isProcessing) return;
     clearResult();
+    setCancellationMessage('');
     setCrop(nextCrop);
   };
 
   const clearSource = () => {
+    if (isProcessing) return;
     if (sourceUrlRef.current) {
       URL.revokeObjectURL(sourceUrlRef.current);
       sourceUrlRef.current = '';
@@ -201,6 +213,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
     setCrop(EMPTY_CROP);
     setScale(1);
     setErrorMessage('');
+    setCancellationMessage('');
   };
 
   const cropImage = async () => {
@@ -218,17 +231,22 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
     const targetWidth = Math.max(1, Math.round(safeWidth * scale));
     const targetHeight = Math.max(1, Math.round(safeHeight * scale));
 
+    const signal = beginTask();
+    if (!signal) return;
     setIsProcessing(true);
+    setCancellationMessage('');
     setErrorMessage('');
     clearResult();
 
     try {
+      throwIfAborted(signal);
       let blob: Blob;
       if (format.animated) {
         const [gifBlob] = await processGifFilters(
           sourceFile,
           [`crop=${safeWidth}:${safeHeight}:${safeX}:${safeY},scale=${targetWidth}:${targetHeight}:flags=lanczos`],
           setProgressMessage,
+          signal,
         );
         blob = gifBlob;
       } else {
@@ -236,6 +254,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
         blob = await cropStaticImage(image, safeCrop, targetWidth, targetHeight, format);
       }
 
+      throwIfAborted(signal);
       const resultUrl = URL.createObjectURL(blob);
       resultUrlRef.current = resultUrl;
       const baseName = sourceFile.name.replace(/\.[^.]+$/, '') || 'image';
@@ -245,11 +264,16 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
 
       confetti({ particleCount: 80, spread: 65, origin: { y: 0.8 } });
     } catch (error) {
-      console.error(error);
-      setErrorMessage(error instanceof Error ? error.message : '이미지를 자르는 중 오류가 발생했습니다.');
+      if (signal.aborted || isAbortError(error)) {
+        setCancellationMessage('작업을 취소했습니다. 자르기 영역을 유지했습니다.');
+      } else {
+        console.error(error);
+        setErrorMessage(error instanceof Error ? error.message : '이미지를 자르는 중 오류가 발생했습니다.');
+      }
     } finally {
       setIsProcessing(false);
       setProgressMessage('');
+      finishTask();
     }
   };
 
@@ -333,7 +357,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
           </div>
         </div>
 
-        <div className="glass-panel relative flex min-h-[300px] select-none items-center justify-center overflow-hidden rounded-2xl bg-black">
+        <div className={`glass-panel relative flex min-h-[300px] select-none items-center justify-center overflow-hidden rounded-2xl bg-black ${isProcessing ? 'pointer-events-none' : ''}`}>
           <img
             ref={imageRef}
             src={sourceUrl}
@@ -377,6 +401,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
               disabled={isProcessing}
               onChange={(event) => {
                 clearResult();
+                setCancellationMessage('');
                 setScale(Number(event.target.value));
               }}
               className="h-1.5 w-full cursor-pointer appearance-none rounded-lg bg-white/5 accent-purple-500 disabled:opacity-50"
@@ -395,6 +420,8 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
             {isProcessing ? <Loader2 className="h-5 w-5 animate-spin" /> : <Sparkles className="h-5 w-5" />}
             <span>{isProcessing ? (progressMessage || '처리 중...') : `${sourceFormat?.extension.toUpperCase()} 자르기`}</span>
           </button>
+          {isProcessing && <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />}
+          {cancellationMessage && <p role="status" className="text-xs text-gray-400">{cancellationMessage}</p>}
 
           {errorMessage && (
             <div className="flex items-start gap-2 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">

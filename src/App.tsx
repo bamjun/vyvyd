@@ -73,6 +73,8 @@ function App() {
           <div className="grid w-full max-w-3xl grid-cols-1 gap-2 rounded-2xl border border-white/5 bg-[#121318] p-1.5 shadow-inner sm:grid-cols-3">
             <button
               onClick={() => setActiveTab('video')}
+              aria-pressed={activeTab === 'video'}
+              aria-controls="video-panel"
               className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
                 activeTab === 'video'
                   ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
@@ -84,6 +86,8 @@ function App() {
             </button>
             <button
               onClick={() => setActiveTab('editor')}
+              aria-pressed={activeTab === 'editor'}
+              aria-controls="editor-panel"
               className={`flex items-center justify-center space-x-2 px-6 py-3 rounded-xl font-medium text-sm transition duration-200 ${
                 activeTab === 'editor'
                   ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
@@ -95,6 +99,8 @@ function App() {
             </button>
             <button
               onClick={() => setActiveTab('formatter')}
+              aria-pressed={activeTab === 'formatter'}
+              aria-controls="formatter-panel"
               className={`flex items-center justify-center space-x-2 rounded-xl px-4 py-3 text-sm font-medium transition duration-200 ${
                 activeTab === 'formatter'
                   ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
@@ -121,13 +127,16 @@ function App() {
           <div className="absolute top-0 right-1/4 w-80 h-80 bg-purple-600/10 rounded-full blur-[100px] pointer-events-none" />
           <div className="absolute bottom-0 left-1/4 w-80 h-80 bg-indigo-600/10 rounded-full blur-[100px] pointer-events-none" />
 
-          {activeTab === 'formatter' ? (
+          {/* Keep each tool mounted so switching tabs preserves files and running jobs. */}
+          <div id="formatter-panel" hidden={activeTab !== 'formatter'}>
             <DiscordUrlFormatter />
-          ) : activeTab === 'video' ? (
-            <VideoToGif onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
-          ) : (
+          </div>
+          <div id="video-panel" hidden={activeTab !== 'video'}>
+            <VideoToGif onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} isActive={activeTab === 'video'} />
+          </div>
+          <div id="editor-panel" hidden={activeTab !== 'editor'}>
             <ImageEditor onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
-          )}
+          </div>
         </div>
 
         {/* Privacy Note Cards */}

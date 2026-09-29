@@ -1,17 +1,13 @@
 import { fetchFile } from '@ffmpeg/util';
+import type { FFmpeg } from '@ffmpeg/ffmpeg';
 import { parseGIF } from 'gifuct-js';
-import ffmpeg, { loadFFmpeg } from '@/lib/ffmpeg';
+import { runFFmpegJob } from '@/lib/ffmpeg';
+import { throwIfAborted } from '@/lib/cancellation';
 
 let jobSequence = 0;
-let processingQueue: Promise<void> = Promise.resolve();
 
-const enqueue = <T>(task: () => Promise<T>) => {
-  const result = processingQueue.then(task, task);
-  processingQueue = result.then(() => undefined, () => undefined);
-  return result;
-};
-
-const safeDelete = async (fileName: string) => {
+const safeDelete = async (ffmpeg: FFmpeg, fileName: string) => {
+  if (!ffmpeg.loaded) return;
   try {
     await ffmpeg.deleteFile(fileName);
   } catch {
@@ -28,9 +24,8 @@ export const processGifFilters = (
   file: File,
   filters: string[],
   onProgress?: (message: string) => void,
-) => enqueue(async () => {
-  await loadFFmpeg((message) => onProgress?.(message));
-
+  signal?: AbortSignal,
+) => runFFmpegJob(async (ffmpeg) => {
   const jobId = `${Date.now()}-${jobSequence}`;
   jobSequence += 1;
   const inputName = `gif-input-${jobId}.gif`;
@@ -39,9 +34,12 @@ export const processGifFilters = (
 
   try {
     onProgress?.('GIF 파일을 읽는 중...');
-    await ffmpeg.writeFile(inputName, await fetchFile(file));
+    const inputData = await fetchFile(file);
+    throwIfAborted(signal);
+    await ffmpeg.writeFile(inputName, inputData);
 
     for (let index = 0; index < filters.length; index += 1) {
+      throwIfAborted(signal);
       const outputName = `gif-output-${jobId}-${index}.gif`;
       outputNames.push(outputName);
       onProgress?.(`GIF 애니메이션 처리 중 ${index + 1}/${filters.length}`);
@@ -53,19 +51,21 @@ export const processGifFilters = (
         '-loop', '0',
         outputName,
       ]);
+      throwIfAborted(signal);
       if (exitCode !== 0) throw new Error('GIF 처리에 실패했습니다. 파일을 확인해 주세요.');
 
       const data = await ffmpeg.readFile(outputName);
+      throwIfAborted(signal);
       blobs.push(new Blob([data as BlobPart], { type: 'image/gif' }));
-      await safeDelete(outputName);
+      await safeDelete(ffmpeg, outputName);
     }
 
     return blobs;
   } finally {
-    await safeDelete(inputName);
-    await Promise.all(outputNames.map(safeDelete));
+    await safeDelete(ffmpeg, inputName);
+    await Promise.all(outputNames.map((name) => safeDelete(ffmpeg, name)));
   }
-});
+}, signal, onProgress);
 
 interface GifMergePosition {
   x: number;
@@ -78,12 +78,11 @@ export const mergeGifFiles = (
   files: File[],
   positions: GifMergePosition[],
   onProgress?: (message: string) => void,
-) => enqueue(async () => {
+  signal?: AbortSignal,
+) => runFFmpegJob(async (ffmpeg) => {
   if (files.length < 2 || files.length !== positions.length) {
     throw new Error('합칠 GIF 파일을 2개 이상 추가해 주세요.');
   }
-  await loadFFmpeg((message) => onProgress?.(message));
-
   const jobId = `${Date.now()}-${jobSequence}`;
   jobSequence += 1;
   const inputNames = files.map((_, index) => `gif-merge-${jobId}-${index}.gif`);
@@ -93,8 +92,10 @@ export const mergeGifFiles = (
 
   try {
     for (let index = 0; index < files.length; index += 1) {
+      throwIfAborted(signal);
       onProgress?.(`GIF 파일을 읽는 중 ${index + 1}/${files.length}`);
       const buffer = await files[index].arrayBuffer();
+      throwIfAborted(signal);
       const gif = parseGIF(buffer);
       if (gif.lsd.width !== positions[index].width || gif.lsd.height !== positions[index].height) {
         throw new Error('GIF 크기가 변경되었습니다. 파일을 다시 추가해 주세요.');
@@ -117,6 +118,7 @@ export const mergeGifFiles = (
       longestDuration = Math.max(longestDuration, duration);
       await ffmpeg.writeFile(inputNames[index], new Uint8Array(buffer));
     }
+    throwIfAborted(signal);
 
     const normalizedInputs = files.map((_, index) =>
       `[${index}:v]setpts=PTS-STARTPTS,format=rgba[input${index}];`).join('');
@@ -141,16 +143,18 @@ export const mergeGifFiles = (
       '-final_delay', String(longestDuration - latestFrameStart),
       outputName,
     ]);
+    throwIfAborted(signal);
     if (exitCode !== 0) {
       throw new Error('GIF 합치기에 실패했습니다. 파일 수나 크기를 줄여 다시 시도해 주세요.');
     }
 
     const data = await ffmpeg.readFile(outputName);
+    throwIfAborted(signal);
     if (typeof data === 'string' || data.byteLength === 0) {
       throw new Error('완성된 GIF 파일을 읽을 수 없습니다.');
     }
     return new Blob([data as BlobPart], { type: 'image/gif' });
   } finally {
-    await Promise.all([...inputNames, outputName].map(safeDelete));
+    await Promise.all([...inputNames, outputName].map((name) => safeDelete(ffmpeg, name)));
   }
-});
+}, signal, onProgress);

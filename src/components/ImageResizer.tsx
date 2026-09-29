@@ -15,6 +15,9 @@ import { formatBytes } from '@/lib/utils';
 import { DiscordSendStatus } from './DiscordSendStatus';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { processGifFilters } from '@/lib/gifProcessing';
+import { useProcessingTask } from '@/hooks/useProcessingTask';
+import { isAbortError, throwIfAborted } from '@/lib/cancellation';
+import { CancelProcessingButton } from './CancelProcessingButton';
 
 interface ImageResizerProps {
   onSuccess: (size: number) => void;
@@ -115,6 +118,8 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const [progressMessage, setProgressMessage] = useState('');
   const [results, setResults] = useState<ResizeResult[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
+  const [cancellationMessage, setCancellationMessage] = useState('');
+  const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const inputUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -137,6 +142,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
     setResults([]);
     setProgressIndex(0);
     setProgressMessage('');
+    setCancellationMessage('');
   };
 
   const reset = () => {
@@ -212,6 +218,8 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
       return;
     }
 
+    const signal = beginTask();
+    if (!signal) return;
     setIsProcessing(true);
     clearResults();
     setErrorMessage('');
@@ -223,6 +231,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
       if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
 
       for (let index = 0; index < imageItems.length; index += 1) {
+        throwIfAborted(signal);
         const item = imageItems[index];
         const target = getTargetDimensions(item, resizeMode, percentage, maxWidth, maxHeight);
         const outputType = getOutputType(outputFormat, item.file.type);
@@ -237,9 +246,11 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
             item.file,
             [`scale=${target.width}:${target.height}:flags=lanczos`],
             setProgressMessage,
+            signal,
           );
         } else {
           const image = await loadImage(item.src);
+          throwIfAborted(signal);
           canvas.width = target.width;
           canvas.height = target.height;
           context.clearRect(0, 0, target.width, target.height);
@@ -258,6 +269,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
             outputType === 'image/png' ? undefined : quality / 100,
           );
         }
+        throwIfAborted(signal);
         const url = URL.createObjectURL(blob);
         resultUrlsRef.current.add(url);
 
@@ -277,13 +289,19 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
         onSuccess(Math.max(0, item.file.size - blob.size));
       }
 
+      throwIfAborted(signal);
       confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
     } catch (error) {
-      console.error(error);
-      setErrorMessage('이미지 축소 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      if (signal.aborted || isAbortError(error)) {
+        setCancellationMessage('작업을 취소했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      } else {
+        console.error(error);
+        setErrorMessage('이미지 축소 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+      }
     } finally {
       setIsProcessing(false);
       setProgressMessage('');
+      finishTask();
     }
   };
 
@@ -552,6 +570,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                     <span>{progressIndex}/{imageItems.length} 처리 중...</span>
                   </div>
                   <span className="text-xs text-gray-400 text-center">{progressMessage || '브라우저에서 안전하게 일괄 축소 중'}</span>
+                  <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />
                 </div>
               ) : (
                 <button
@@ -562,6 +581,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                   <span>{imageItems.length}개 이미지 크기 줄이기</span>
                 </button>
               )}
+              {cancellationMessage && <p role="status" className="text-xs text-gray-400">{cancellationMessage}</p>}
             </div>
 
             {results.length > 0 && (
