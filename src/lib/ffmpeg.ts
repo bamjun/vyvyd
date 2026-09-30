@@ -41,6 +41,7 @@ export const runFFmpegJob = <T>(
   task: (ffmpeg: FFmpeg) => Promise<T>,
   signal?: AbortSignal,
   onProgress?: (message: string) => void,
+  resetOnError = false,
 ): Promise<T> => {
   if (signal?.aborted) return Promise.reject(new DOMException('작업을 취소했습니다.', 'AbortError'));
   onProgress?.('변환 작업 대기 중...');
@@ -73,7 +74,8 @@ export const runFFmpegJob = <T>(
       // Any late callback keeps its terminated engine, never the next job's one.
       return await Promise.race([work, aborted]);
     } catch (error) {
-      if (!jobEngine.loaded) terminate();
+      // Some failed encodes leave WASM unusable even while loaded stays true.
+      if (resetOnError || !jobEngine.loaded) terminate();
       throwIfAborted(signal);
       throw error;
     } finally {

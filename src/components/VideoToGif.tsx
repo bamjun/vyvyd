@@ -1,19 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { formatBytes } from '@/lib/utils';
-import { fetchFile } from '@ffmpeg/util';
-import type { FFmpeg } from '@ffmpeg/ffmpeg';
 import { Film, Download, DownloadCloud, Sparkles, AlertCircle, RefreshCw, Loader2, Send } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { CropOverlay } from './CropOverlay';
 import { DiscordSendStatus } from './DiscordSendStatus';
-import { runFFmpegJob } from '@/lib/ffmpeg';
+import { convertVideoToGif } from '@/lib/convertVideo';
+import { runVideoBatch } from '@/lib/videoBatch';
+import type { VideoBatchFileState } from '@/lib/videoBatch';
 import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { CancelProcessingButton } from './CancelProcessingButton';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { VideoOutputSettings } from './VideoOutputSettings';
 import { VideoOutputPreview } from './VideoOutputPreview';
-import { buildVideoFilter, clampVideoCrop } from '@/lib/videoGeometry';
 import type { VideoCrop } from '@/lib/videoGeometry';
 import {
   applyVideoOutputSettings, changeOutputDimension, changeVideoCrop, createVideoSettings,
@@ -47,6 +46,9 @@ interface GifResult {
 }
 
 const EMPTY_SETTINGS = createVideoSettings({ width: 1, height: 1, duration: 1 });
+const FILE_STATUS_LABELS: Record<VideoBatchFileState['status'], string> = {
+  waiting: '대기 중', processing: '변환 중', succeeded: '완료', failed: '실패', cancelled: '미완료',
+};
 
 const loadVideoMetadata = (src: string): Promise<HTMLVideoElement> =>
   new Promise((resolve, reject) => {
@@ -72,6 +74,8 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [progressMsg, setProgressMsg] = useState<string>('');
   const [progressIndex, setProgressIndex] = useState<number>(0);
+  const [progressTotal, setProgressTotal] = useState(0);
+  const [fileStates, setFileStates] = useState<Record<string, VideoBatchFileState>>({});
   const [results, setResults] = useState<GifResult[]>([]);
   const [errorMessage, setErrorMessage] = useState<string>('');
 
@@ -108,7 +112,9 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
     setVideoItems([]);
     setSelectedVideoId('');
     setResults([]);
+    setFileStates({});
     setProgressIndex(0);
+    setProgressTotal(0);
     setProgressMsg('');
     setErrorMessage('');
     setSettingsNotice('');
@@ -191,126 +197,88 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
     setSettingsNotice('모든 영상에 같은 출력 크기와 맞춤 방식을 적용했습니다. 자르기 영역과 구간은 그대로 유지됩니다.');
   };
 
-  const safeDelete = async (ffmpeg: FFmpeg, fileName: string) => {
-    if (!ffmpeg.loaded) return;
-    try {
-      await ffmpeg.deleteFile(fileName);
-    } catch {
-      // The file may not have been created if FFmpeg failed early.
-    }
-  };
+  const convertToGif = async (targets: VideoItem[], preserveResults = false) => {
+    if (targets.length === 0 || isProcessing) return;
 
-  const convertToGif = async () => {
-    if (videoItems.length === 0 || isProcessing) return;
-
-    const invalidVideo = videoItems.find((item) => !hasValidVideoSettings(item.settings));
-    if (invalidVideo) {
-      setSelectedVideoId(invalidVideo.id);
-      setErrorMessage(`${invalidVideo.file.name}: 출력 크기와 변환 구간을 확인해 주세요.`);
+    const invalidTarget = targets.find((item) => !hasValidVideoSettings(item.settings));
+    if (invalidTarget) {
+      setSelectedVideoId(invalidTarget.id);
+      setErrorMessage(`${invalidTarget.file.name}: 출력 크기와 변환 구간을 확인해 주세요.`);
       return;
     }
 
     const signal = beginTask();
     if (!signal) return;
-
+    const targetIds = new Set(targets.map((item) => item.id));
     setIsProcessing(true);
     setProgressIndex(0);
+    setProgressTotal(targets.length);
     setProgressMsg('변환 작업 대기 중...');
-    setResults([]);
-    clearUrls(resultUrlsRef.current);
     setErrorMessage('');
+    if (!preserveResults) {
+      setResults([]);
+      clearUrls(resultUrlsRef.current);
+    }
+    setFileStates((previous) => ({
+      ...(preserveResults ? previous : {}),
+      ...Object.fromEntries(targets.map((item) => [item.id, { status: 'waiting' as const }])),
+    }));
 
-    const nextResults: GifResult[] = [];
-
+    let succeeded = 0;
+    let failed = 0;
     try {
-      await runFFmpegJob(async (ffmpeg) => {
-        for (let index = 0; index < videoItems.length; index += 1) {
-          throwIfAborted(signal);
-          const item = videoItems[index];
-          const itemSettings = item.settings;
-          const targetWidth = Number(itemSettings.outputWidth);
-          const targetHeight = Number(itemSettings.outputHeight);
-          const inputName = `input-${index}.mp4`;
-          const paletteName = `palette-${index}.png`;
-          const outputName = `output-${index}.gif`;
-          const effectiveStart = Math.max(0, Math.min(itemSettings.startTime, Math.max(0, item.duration - 0.1)));
-          const effectiveEnd = Math.min(Math.max(effectiveStart + 0.1, itemSettings.endTime), item.duration);
-          const duration = Math.max(0.1, effectiveEnd - effectiveStart);
-          const itemCrop = clampVideoCrop(itemSettings.crop, item);
-          const filterString = buildVideoFilter(itemCrop, { width: targetWidth, height: targetHeight }, itemSettings.fitMode, fps);
-          const ditherConfig = dither === 'none' ? 'dither=none' : `dither=${dither}`;
-
+      await runVideoBatch({
+        items: targets,
+        signal,
+        onStart: (item, index) => {
           setProgressIndex(index + 1);
-          setProgressMsg(`${index + 1}/${videoItems.length} 파일 변환 중...`);
-
-          try {
-            setProgressMsg(`${index + 1}/${videoItems.length} 파일 읽는 중...`);
-            const videoData = await fetchFile(item.file);
-            throwIfAborted(signal);
-            await ffmpeg.writeFile(inputName, videoData);
-            throwIfAborted(signal);
-
-            setProgressMsg(`${index + 1}/${videoItems.length} 색상 팔레트 생성 중...`);
-            const paletteExit = await ffmpeg.exec([
-              '-y',
-              '-ss', effectiveStart.toString(),
-              '-t', duration.toString(),
-              '-i', inputName,
-              '-vf', `${filterString},palettegen=stats_mode=diff:reserve_transparent=1`,
-              paletteName,
-            ]);
-            throwIfAborted(signal);
-            if (paletteExit !== 0) throw new Error('색상 팔레트를 만들지 못했습니다.');
-
-            setProgressMsg(`${index + 1}/${videoItems.length} GIF 렌더링 중...`);
-            const renderExit = await ffmpeg.exec([
-              '-y',
-              '-ss', effectiveStart.toString(),
-              '-t', duration.toString(),
-              '-i', inputName,
-              '-i', paletteName,
-              '-filter_complex', `[0:v]${filterString}[v];[v][1:v]paletteuse=${ditherConfig}`,
-              outputName,
-            ]);
-            throwIfAborted(signal);
-            if (renderExit !== 0) throw new Error('GIF를 만들지 못했습니다.');
-
-            const data = await ffmpeg.readFile(outputName);
-            throwIfAborted(signal);
-            const gifBlob = new Blob([data as BlobPart], { type: 'image/gif' });
-            const url = URL.createObjectURL(gifBlob);
+          setFileStates((previous) => ({ ...previous, [item.id]: { status: 'processing' } }));
+        },
+        convert: (item, index) => convertVideoToGif(item, {
+          fps, dither, signal,
+          onProgress: (message) => {
+            if (!signal.aborted) setProgressMsg(`${index + 1}/${targets.length} · ${item.file.name}: ${message}`);
+          },
+        }),
+        onOutcome: (item, outcome) => {
+          if (outcome.status === 'succeeded') {
+            const blob = outcome.result;
+            const url = URL.createObjectURL(blob);
             resultUrlsRef.current.add(url);
-
             const result: GifResult = {
-              id: item.id,
-              fileName: item.file.name,
-              url,
-              size: gifBlob.size,
-              width: targetWidth,
-              height: targetHeight,
+              id: item.id, fileName: item.file.name, url, size: blob.size,
+              width: Number(item.settings.outputWidth), height: Number(item.settings.outputHeight),
             };
-            nextResults.push(result);
-            setResults([...nextResults]);
-            onSuccess(gifBlob.size);
-          } finally {
-            await safeDelete(ffmpeg, inputName);
-            await safeDelete(ffmpeg, paletteName);
-            await safeDelete(ffmpeg, outputName);
+            setResults((previous) => [...previous.filter((entry) => entry.id !== item.id), result]
+              .sort((left, right) => videoItems.findIndex((video) => video.id === left.id) - videoItems.findIndex((video) => video.id === right.id)));
+            succeeded += 1;
+            onSuccess(blob.size);
+          } else if (outcome.status === 'failed') {
+            failed += 1;
           }
-        }
-      }, signal, setProgressMsg);
-
+          setFileStates((previous) => ({
+            ...previous,
+            [item.id]: outcome.status === 'failed'
+              ? { status: 'failed', message: outcome.message }
+              : { status: outcome.status },
+          }));
+        },
+      });
       throwIfAborted(signal);
-      confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
-      setProgressMsg('');
+      if (failed === 0 && succeeded > 0) confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
+      setProgressMsg(`이번 작업: 완료 ${succeeded}개 · 실패 ${failed}개.${failed > 0 ? ' 실패한 파일만 다시 시도할 수 있습니다.' : ''}`);
     } catch (error) {
       if (isAbortError(error) || signal.aborted) {
-        setProgressMsg('변환을 취소했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+        setProgressMsg('변환을 취소했습니다. 완료된 결과는 유지되며, 남은 파일은 이어서 변환할 수 있습니다.');
       } else {
         console.error(error);
         setProgressMsg('');
-        setErrorMessage('GIF 변환 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+        setErrorMessage('작업이 중단되었습니다. 완료된 결과는 유지되며, 남은 파일은 이어서 변환할 수 있습니다.');
       }
+      setFileStates((previous) => Object.fromEntries(Object.entries(previous).map(([id, state]) => [
+        id, targetIds.has(id) && (state.status === 'waiting' || state.status === 'processing')
+          ? { status: 'cancelled' as const } : state,
+      ])));
     } finally {
       finishTask();
       setIsProcessing(false);
@@ -341,6 +309,11 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
 
   const isBatch = videoItems.length > 1;
   const invalidVideo = videoItems.find((item) => !hasValidVideoSettings(item.settings));
+  const failedEntries = videoItems.flatMap((item) => {
+    const state = fileStates[item.id];
+    return state?.status === 'failed' ? [{ item, message: state.message }] : [];
+  });
+  const cancelledItems = videoItems.filter((item) => fileStates[item.id]?.status === 'cancelled');
 
   return (
     <div className="space-y-8">
@@ -392,6 +365,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                       <p className={`text-[10px] ${hasValidVideoSettings(item.settings) ? 'text-purple-300' : 'text-amber-300'}`}>
                         {hasValidVideoSettings(item.settings) ? `출력 ${item.settings.outputWidth} × ${item.settings.outputHeight}px` : '출력 크기·구간 확인 필요'}
                       </p>
+                      {fileStates[item.id] && <p className={`text-xs font-medium ${fileStates[item.id].status === 'failed' ? 'text-red-300' : fileStates[item.id].status === 'succeeded' ? 'text-green-400' : 'text-gray-400'}`}>{FILE_STATUS_LABELS[fileStates[item.id].status]}</p>}
                     </button>
                   ))}
                 </div>
@@ -597,22 +571,50 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                 <div className="w-full py-4 bg-[#121318] border border-white/10 rounded-xl flex flex-col items-center justify-center space-y-2 text-purple-400 font-medium">
                   <div className="flex items-center space-x-3">
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>Processing {progressIndex}/{videoItems.length}</span>
+                    <span>Processing {progressIndex}/{progressTotal}</span>
                   </div>
                   <span className="text-xs text-gray-400 text-center">{progressMsg}</span>
                   <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />
                 </div>
               ) : (
                 <button
-                  onClick={convertToGif}
+                  onClick={() => void convertToGif(videoItems)}
                   disabled={Boolean(invalidVideo)}
                   className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition duration-300 flex items-center justify-center space-x-2"
                 >
                   <Sparkles className="w-5 h-5 animate-pulse" />
-                  <span>Convert {videoItems.length} GIF{videoItems.length > 1 ? 's' : ''}</span>
+                  <span>{Object.keys(fileStates).length > 0 ? `전체 ${videoItems.length}개 다시 변환` : `Convert ${videoItems.length} GIF${videoItems.length > 1 ? 's' : ''}`}</span>
                 </button>
               )}
             </div>
+
+            {failedEntries.length > 0 && (
+              <section aria-label="변환 실패 파일" className="glass-panel rounded-2xl border border-red-500/20 p-5 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-red-300">실패 {failedEntries.length}개</h3>
+                  <button type="button" onClick={() => void convertToGif(failedEntries.map(({ item }) => item), true)} disabled={isProcessing} className="rounded-lg bg-purple-600 px-3 py-2 text-xs font-medium hover:bg-purple-500 disabled:opacity-50">실패 {failedEntries.length}개만 다시 시도</button>
+                </div>
+                <p className="text-xs text-gray-400">완료된 GIF는 유지됩니다. 설정을 수정한 뒤 다시 시도할 수 있습니다.</p>
+                <ul className="space-y-3">
+                  {failedEntries.map(({ item, message }) => (
+                    <li key={item.id} className="rounded-xl border border-white/5 bg-black/20 p-3 space-y-2">
+                      <p className="break-all text-sm text-gray-200">{item.file.name}</p>
+                      <p className="text-xs text-red-300">{message}</p>
+                      <div className="flex flex-wrap gap-2">
+                        <button type="button" aria-label={`${item.file.name} 설정 수정`} onClick={() => { videoRef.current?.pause(); setSelectedVideoId(item.id); }} disabled={isProcessing} className="rounded-lg border border-white/10 px-3 py-2 text-xs text-gray-300 hover:bg-white/5 disabled:opacity-50">설정 수정</button>
+                        <button type="button" aria-label={`${item.file.name} 다시 시도`} onClick={() => void convertToGif([item], true)} disabled={isProcessing} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">다시 시도</button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {cancelledItems.length > 0 && !isProcessing && (
+              <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-3">
+                <p className="text-xs text-gray-400">아직 완료하지 못한 파일이 {cancelledItems.length}개 있습니다.</p>
+                <button type="button" onClick={() => void convertToGif(cancelledItems, true)} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10">남은 {cancelledItems.length}개 이어서 변환</button>
+              </div>
+            )}
 
             {results.length > 0 && (
               <div className="glass-panel rounded-2xl p-6 space-y-4 border border-green-500/20">

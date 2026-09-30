@@ -154,6 +154,20 @@ test('a failed job does not block subsequent jobs', async () => {
   assert.equal(await queue.runFFmpegJob(async () => 'next file'), 'next file');
 });
 
+test('a failed video job discards its engine before the next file and never terminates its successor', async () => {
+  const queue = harness();
+  const controller = new AbortController();
+  await assert.rejects(queue.runFFmpegJob(async () => { throw new Error('WASM encode failed'); }, controller.signal, undefined, true), /WASM encode failed/);
+  const brokenEngine = queue.instances[0];
+  assert.equal(brokenEngine.terminations, 1);
+  assert.equal(brokenEngine.loaded, false);
+  const nextEngine = await queue.runFFmpegJob(async (ffmpeg) => ffmpeg);
+  assert.notEqual(nextEngine, brokenEngine);
+  assert.equal(nextEngine.loaded, true);
+  controller.abort();
+  assert.equal(nextEngine.terminations, 0);
+});
+
 test('aborting a completed job cannot terminate an engine reused by a later job', async () => {
   const queue = harness();
   const controller = new AbortController();
