@@ -18,6 +18,8 @@ import { processGifFilters } from '@/lib/gifProcessing';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
+import { useMediaReceiver } from '@/hooks/useMediaTransfer';
+import { ResultActions } from './ResultActions';
 
 interface ImageResizerProps {
   onSuccess: (size: number) => void;
@@ -122,11 +124,17 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const inputUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const nextInputIdRef = useRef(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
+  const isBusy = isProcessing || isLoadingImages || activeRequestId !== null;
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       inputUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       resultUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
@@ -146,15 +154,59 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   };
 
   const reset = () => {
-    if (isProcessing) return;
+    if (busyRef.current || isBusy) return;
     clearUrls(inputUrlsRef.current);
     clearResults();
     setImageItems([]);
     setErrorMessage('');
   };
 
+  const prepareImages = async (files: File[]): Promise<ImageItem[]> => {
+    const newUrls = new Set<string>();
+    try {
+      const items = await Promise.all(files.map(async (file): Promise<ImageItem> => {
+        const src = URL.createObjectURL(file);
+        newUrls.add(src);
+        inputUrlsRef.current.add(src);
+        const image = await loadImage(src);
+        if (image.naturalWidth < 1 || image.naturalHeight < 1) throw new Error('이미지를 읽을 수 없습니다.');
+        return {
+          id: `resize-input-${nextInputIdRef.current++}`,
+          file,
+          src,
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        };
+      }));
+      if (!mountedRef.current) throw new Error('이미지 축소 도구가 닫혔습니다. 다시 시도해 주세요.');
+      return items;
+    } catch (error) {
+      newUrls.forEach((url) => {
+        URL.revokeObjectURL(url);
+        inputUrlsRef.current.delete(url);
+      });
+      throw error;
+    }
+  };
+
+  useMediaReceiver('resize', async (files) => {
+    if (busyRef.current || isBusy) throw new Error('이미지 축소 작업이나 전송이 끝난 뒤 다시 보내 주세요.');
+    if (files.length === 0 || files.some((file) => !SUPPORTED_INPUT_TYPES.has(file.type))) {
+      throw new Error('이미지 축소에는 JPG, PNG, WebP, GIF만 보낼 수 있습니다.');
+    }
+    busyRef.current = true;
+    setIsLoadingImages(true);
+    try {
+      const items = await prepareImages(files);
+      setImageItems((previous) => [...previous, ...items]);
+    } finally {
+      busyRef.current = false;
+      setIsLoadingImages(false);
+    }
+  });
+
   const loadFiles = async (selectedFiles: File[]) => {
-    if (isProcessing) return;
+    if (busyRef.current || isBusy) return;
 
     const files = selectedFiles.filter((file) => SUPPORTED_INPUT_TYPES.has(file.type));
     if (files.length === 0) {
@@ -163,26 +215,12 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
     }
 
     reset();
+    busyRef.current = true;
     setIsLoadingImages(true);
     setErrorMessage('');
 
     try {
-      const items = await Promise.all(
-        files.map(async (file, index): Promise<ImageItem> => {
-          const src = URL.createObjectURL(file);
-          inputUrlsRef.current.add(src);
-          const image = await loadImage(src);
-
-          return {
-            id: `${file.name}-${file.lastModified}-${index}`,
-            file,
-            src,
-            width: image.naturalWidth,
-            height: image.naturalHeight,
-          };
-        }),
-      );
-
+      const items = await prepareImages(files);
       setImageItems(items);
       if (files.length !== selectedFiles.length) {
         setErrorMessage('지원하지 않는 파일은 제외했습니다. JPG, PNG, WebP, GIF만 처리됩니다.');
@@ -193,6 +231,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
       setImageItems([]);
       setErrorMessage('일부 이미지를 읽을 수 없습니다. 파일을 다시 선택해 주세요.');
     } finally {
+      busyRef.current = false;
       setIsLoadingImages(false);
     }
   };
@@ -203,7 +242,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   };
 
   const updateSetting = (callback: () => void) => {
-    if (isProcessing) return;
+    if (busyRef.current || isBusy) return;
     clearResults();
     setErrorMessage('');
     callback();
@@ -211,7 +250,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
   const createResizedImages = async () => {
     const canvas = canvasRef.current;
-    if (!canvas || imageItems.length === 0 || isProcessing) return;
+    if (!canvas || imageItems.length === 0 || busyRef.current || isBusy) return;
 
     if (resizeMode === 'bounds' && (maxWidth < 1 || maxHeight < 1)) {
       setErrorMessage('최대 가로와 세로는 1px 이상이어야 합니다.');
@@ -220,6 +259,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
     const signal = beginTask();
     if (!signal) return;
+    busyRef.current = true;
     setIsProcessing(true);
     clearResults();
     setErrorMessage('');
@@ -299,6 +339,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
         setErrorMessage('이미지 축소 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
       }
     } finally {
+      busyRef.current = false;
       setIsProcessing(false);
       setProgressMessage('');
       finishTask();
@@ -316,24 +357,33 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
     });
   };
 
+  const sendResultsToDiscord = async (requestId: string, selectedResults: ResizeResult[]) => {
+    if (busyRef.current || isBusy) return;
+    busyRef.current = true;
+    try {
+      await sendToDiscord(requestId, selectedResults.map((result) => ({ url: result.url, name: result.downloadName })));
+    } finally {
+      busyRef.current = false;
+    }
+  };
+
   const sendResultToDiscord = (result: ResizeResult) => {
-    void sendToDiscord(result.id, [{ url: result.url, name: result.downloadName }]);
+    void sendResultsToDiscord(result.id, [result]);
   };
 
   const sendAllToDiscord = () => {
-    void sendToDiscord('all', results.map((result) => ({
-      url: result.url,
-      name: result.downloadName,
-    })));
+    void sendResultsToDiscord('all', results);
   };
 
   const totalOriginalSize = imageItems.reduce((sum, item) => sum + item.file.size, 0);
   const totalResultSize = results.reduce((sum, result) => sum + result.size, 0);
+  const completedOriginalSize = results.reduce((sum, result) => sum + result.originalSize, 0);
   const isLossyOutput = outputFormat === 'jpeg' || outputFormat === 'webp'
     || (outputFormat === 'original' && imageItems.some((item) => item.file.type !== 'image/png' && item.file.type !== 'image/gif'));
 
   return (
     <div className="space-y-8">
+      {isLoadingImages && imageItems.length > 0 && <p role="status" className="text-xs text-purple-300">이미지 불러오는 중...</p>}
       {imageItems.length === 0 ? (
         <div
           onDragEnter={(event) => {
@@ -368,6 +418,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
               accept="image/jpeg,image/png,image/webp,image/gif"
               multiple
               onChange={handleFileChange}
+              disabled={isBusy}
               className="hidden"
             />
           </label>
@@ -387,7 +438,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
               </div>
               <button
                 onClick={reset}
-                disabled={isProcessing}
+                disabled={isBusy}
                 className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50 flex items-center space-x-1"
               >
                 <RefreshCw className="w-3 h-3" />
@@ -431,7 +482,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                   <div className="grid grid-cols-2 gap-3">
                     <button
                       onClick={() => updateSetting(() => setResizeMode('percentage'))}
-                      disabled={isProcessing}
+                      disabled={isBusy}
                       className={`rounded-xl border px-3 py-2.5 text-sm transition ${
                         resizeMode === 'percentage'
                           ? 'border-purple-500 bg-purple-500/15 text-purple-300'
@@ -442,7 +493,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                     </button>
                     <button
                       onClick={() => updateSetting(() => setResizeMode('bounds'))}
-                      disabled={isProcessing}
+                      disabled={isBusy}
                       className={`rounded-xl border px-3 py-2.5 text-sm transition ${
                         resizeMode === 'bounds'
                           ? 'border-purple-500 bg-purple-500/15 text-purple-300'
@@ -467,7 +518,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                       step={1}
                       value={percentage}
                       onChange={(event) => updateSetting(() => setPercentage(Number(event.target.value)))}
-                      disabled={isProcessing}
+                      disabled={isBusy}
                       className="w-full accent-purple-500 bg-white/5 h-1.5 rounded-lg appearance-none cursor-pointer disabled:opacity-50"
                     />
                     <div className="grid grid-cols-4 gap-2 mt-3">
@@ -475,7 +526,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                         <button
                           key={preset}
                           onClick={() => updateSetting(() => setPercentage(preset))}
-                          disabled={isProcessing}
+                          disabled={isBusy}
                           className={`rounded-lg border py-1.5 text-xs transition ${
                             percentage === preset
                               ? 'border-purple-500/60 bg-purple-500/15 text-purple-300'
@@ -499,7 +550,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                           step={1}
                           value={maxWidth}
                           onChange={(event) => updateSetting(() => setMaxWidth(Math.max(1, Number(event.target.value))))}
-                          disabled={isProcessing}
+                          disabled={isBusy}
                           className="w-full bg-[#121318] border border-purple-500/30 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
                         />
                       </div>
@@ -511,7 +562,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                           step={1}
                           value={maxHeight}
                           onChange={(event) => updateSetting(() => setMaxHeight(Math.max(1, Number(event.target.value))))}
-                          disabled={isProcessing}
+                          disabled={isBusy}
                           className="w-full bg-[#121318] border border-purple-500/30 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
                         />
                       </div>
@@ -527,7 +578,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                   <select
                     value={outputFormat}
                     onChange={(event) => updateSetting(() => setOutputFormat(event.target.value as OutputFormat))}
-                    disabled={isProcessing}
+                    disabled={isBusy}
                     className="w-full bg-[#121318] border border-white/10 rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
                   >
                     <option value="original">원본 형식 유지</option>
@@ -550,7 +601,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                       step={1}
                       value={quality}
                       onChange={(event) => updateSetting(() => setQuality(Number(event.target.value)))}
-                      disabled={isProcessing}
+                      disabled={isBusy}
                       className="w-full accent-purple-500 bg-white/5 h-1.5 rounded-lg appearance-none cursor-pointer disabled:opacity-50"
                     />
                   </div>
@@ -575,7 +626,8 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
               ) : (
                 <button
                   onClick={createResizedImages}
-                  className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 transition duration-300 flex items-center justify-center space-x-2"
+                  disabled={isBusy}
+                  className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 transition duration-300 flex items-center justify-center space-x-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Sparkles className="w-5 h-5 animate-pulse" />
                   <span>{imageItems.length}개 이미지 크기 줄이기</span>
@@ -603,7 +655,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                       <button
                         type="button"
                         onClick={sendAllToDiscord}
-                        disabled={activeRequestId !== null}
+                        disabled={isBusy}
                         className="flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 px-3 py-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {activeRequestId === 'all' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -615,15 +667,24 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
                 <DiscordSendStatus status={discordStatus} />
 
+                {results.length > 1 && (
+                  <ResultActions
+                    assets={results.map((result) => ({ url: result.url, name: result.downloadName }))}
+                    disabled={isBusy}
+                    exclude={['resize']}
+                    label="모든 결과 이어 편집"
+                  />
+                )}
+
                 <div className="rounded-xl bg-black/20 border border-white/5 px-3 py-2 text-xs text-gray-400 flex justify-between gap-3">
-                  <span>{formatBytes(totalOriginalSize)}</span>
+                  <span>{formatBytes(completedOriginalSize)}</span>
                   <span>→</span>
                   <span className="text-green-300">{formatBytes(totalResultSize)}</span>
                 </div>
 
                 <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
                   {results.map((result) => (
-                    <div key={result.id} className="flex items-center gap-3 rounded-xl bg-black/30 border border-white/5 p-2">
+                    <div key={result.id} className="flex flex-wrap items-center gap-3 rounded-xl bg-black/30 border border-white/5 p-2">
                       <img src={result.url} alt={`축소된 ${result.originalName}`} className="w-14 h-14 object-contain rounded bg-black/40" />
                       <div className="min-w-0 flex-1">
                         <p className="text-xs text-gray-300 truncate" title={result.downloadName}>{result.downloadName}</p>
@@ -644,7 +705,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                         <button
                           type="button"
                           onClick={() => sendResultToDiscord(result)}
-                          disabled={activeRequestId !== null}
+                          disabled={isBusy}
                           className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 transition disabled:cursor-not-allowed disabled:opacity-50"
                           aria-label={`${result.originalName} Discord로 보내기`}
                           title="Discord로 보내기"
@@ -653,6 +714,14 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                             ? <Loader2 className="w-4 h-4 animate-spin" />
                             : <Send className="w-4 h-4" />}
                         </button>
+                      </div>
+                      <div className="w-full">
+                        <ResultActions
+                          assets={[{ url: result.url, name: result.downloadName }]}
+                          disabled={isBusy}
+                          exclude={['resize']}
+                          label={`${result.downloadName} 이어 편집`}
+                        />
                       </div>
                     </div>
                   ))}

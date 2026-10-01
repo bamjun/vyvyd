@@ -3,6 +3,7 @@ import { AlertCircle, Download, DownloadCloud, ImagePlus, Loader2, RefreshCw, Se
 import confetti from 'canvas-confetti';
 import { formatBytes } from '@/lib/utils';
 import { DiscordSendStatus } from './DiscordSendStatus';
+import { ResultActions } from './ResultActions';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { processGifFilters } from '@/lib/gifProcessing';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
@@ -425,37 +426,51 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                   )}
                 </div>
                 <DiscordSendStatus status={discordStatus} />
+                {results.length > 1 && (
+                  <ResultActions
+                    assets={results.map((result) => ({ url: result.url, name: result.outputName }))}
+                    disabled={isProcessing || isLoadingImages}
+                    label="모든 결과 이어 편집"
+                  />
+                )}
                 <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
                   {results.map((result) => (
-                    <div key={result.id} className="flex items-center gap-3 rounded-xl bg-black/30 border border-white/5 p-2">
-                      <img src={result.url} alt={`9:16 ${result.fileName}`} className="w-12 h-16 object-contain rounded bg-white/5" />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs text-gray-300 truncate" title={result.outputName}>{result.outputName}</p>
-                        <p className="text-[10px] text-gray-500">{result.width} × {result.height}px · {formatBytes(result.size)}</p>
+                    <div key={result.id} className="min-w-0 space-y-3 rounded-xl bg-black/30 border border-white/5 p-2">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <img src={result.url} alt={`9:16 ${result.fileName}`} className="w-12 h-16 object-contain rounded bg-white/5" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs text-gray-300 truncate" title={result.outputName}>{result.outputName}</p>
+                          <p className="text-[10px] text-gray-500">{result.width} × {result.height}px · {formatBytes(result.size)}</p>
+                        </div>
+                        <div className="flex shrink-0 gap-2">
+                          <a
+                            href={result.url}
+                            download={result.outputName}
+                            className="p-2 rounded-lg bg-green-600 hover:bg-green-500 transition"
+                            aria-label={`${result.fileName} 다운로드`}
+                            title="다운로드"
+                          >
+                            <Download className="w-4 h-4" />
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => sendResultToDiscord(result)}
+                            disabled={activeRequestId !== null}
+                            className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 transition disabled:cursor-not-allowed disabled:opacity-50"
+                            aria-label={`${result.fileName} Discord로 보내기`}
+                            title="Discord로 보내기"
+                          >
+                            {activeRequestId === result.id
+                              ? <Loader2 className="w-4 h-4 animate-spin" />
+                              : <Send className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex shrink-0 gap-2">
-                        <a
-                          href={result.url}
-                          download={result.outputName}
-                          className="p-2 rounded-lg bg-green-600 hover:bg-green-500 transition"
-                          aria-label={`${result.fileName} 다운로드`}
-                          title="다운로드"
-                        >
-                          <Download className="w-4 h-4" />
-                        </a>
-                        <button
-                          type="button"
-                          onClick={() => sendResultToDiscord(result)}
-                          disabled={activeRequestId !== null}
-                          className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 transition disabled:cursor-not-allowed disabled:opacity-50"
-                          aria-label={`${result.fileName} Discord로 보내기`}
-                          title="Discord로 보내기"
-                        >
-                          {activeRequestId === result.id
-                            ? <Loader2 className="w-4 h-4 animate-spin" />
-                            : <Send className="w-4 h-4" />}
-                        </button>
-                      </div>
+                      <ResultActions
+                        assets={[{ url: result.url, name: result.outputName }]}
+                        disabled={isProcessing || isLoadingImages}
+                        label={`${result.outputName} 이어 편집`}
+                      />
                     </div>
                   ))}
                 </div>

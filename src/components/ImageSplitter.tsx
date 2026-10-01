@@ -19,6 +19,8 @@ import { processGifFilters } from '@/lib/gifProcessing';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
+import { useMediaReceiver } from '@/hooks/useMediaTransfer';
+import { ResultActions } from './ResultActions';
 
 interface ImageSplitterProps {
   onSuccess: (size: number) => void;
@@ -102,11 +104,17 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const inputUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const nextInputIdRef = useRef(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
+  const isBusy = isProcessing || isLoading || activeRequestId !== null;
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       inputUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       resultUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
@@ -126,15 +134,59 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   };
 
   const reset = () => {
-    if (isProcessing) return;
+    if (busyRef.current || isBusy) return;
     clearUrls(inputUrlsRef.current);
     clearResults();
     setImages([]);
     setErrorMessage('');
   };
 
+  const prepareImages = async (files: File[]): Promise<SourceImage[]> => {
+    const newUrls = new Set<string>();
+    try {
+      const nextImages = await Promise.all(files.map(async (file): Promise<SourceImage> => {
+        const url = URL.createObjectURL(file);
+        newUrls.add(url);
+        inputUrlsRef.current.add(url);
+        const image = await loadImage(url);
+        if (image.naturalWidth < 1 || image.naturalHeight < 1) throw new Error('이미지를 읽을 수 없습니다.');
+        return {
+          id: `split-input-${nextInputIdRef.current++}`,
+          file,
+          url,
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        };
+      }));
+      if (!mountedRef.current) throw new Error('이미지 분할 도구가 닫혔습니다. 다시 시도해 주세요.');
+      return nextImages;
+    } catch (error) {
+      newUrls.forEach((url) => {
+        URL.revokeObjectURL(url);
+        inputUrlsRef.current.delete(url);
+      });
+      throw error;
+    }
+  };
+
+  useMediaReceiver('split', async (files) => {
+    if (busyRef.current || isBusy) throw new Error('이미지 분할 작업이나 전송이 끝난 뒤 다시 보내 주세요.');
+    if (files.length === 0 || files.some((file) => !SUPPORTED_TYPES.has(file.type))) {
+      throw new Error('이미지 분할에는 JPG, PNG, WebP, GIF만 보낼 수 있습니다.');
+    }
+    busyRef.current = true;
+    setIsLoading(true);
+    try {
+      const nextImages = await prepareImages(files);
+      setImages((previous) => [...previous, ...nextImages]);
+    } finally {
+      busyRef.current = false;
+      setIsLoading(false);
+    }
+  });
+
   const loadFiles = async (selectedFiles: File[]) => {
-    if (isProcessing) return;
+    if (busyRef.current || isBusy) return;
     const supportedFiles = selectedFiles.filter((file) => SUPPORTED_TYPES.has(file.type));
 
     if (supportedFiles.length === 0) {
@@ -143,25 +195,12 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
     }
 
     reset();
+    busyRef.current = true;
     setIsLoading(true);
     setErrorMessage('');
 
     try {
-      const nextImages = await Promise.all(
-        supportedFiles.map(async (file, index): Promise<SourceImage> => {
-          const url = URL.createObjectURL(file);
-          inputUrlsRef.current.add(url);
-          const image = await loadImage(url);
-          return {
-            id: `${file.name}-${file.lastModified}-${index}`,
-            file,
-            url,
-            width: image.naturalWidth,
-            height: image.naturalHeight,
-          };
-        }),
-      );
-
+      const nextImages = await prepareImages(supportedFiles);
       setImages(nextImages);
       if (supportedFiles.length !== selectedFiles.length) {
         setErrorMessage('지원하지 않는 파일은 제외했습니다. JPG, PNG, WebP, GIF만 처리됩니다.');
@@ -172,6 +211,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
       setImages([]);
       setErrorMessage('일부 이미지를 읽을 수 없습니다. 다시 선택해 주세요.');
     } finally {
+      busyRef.current = false;
       setIsLoading(false);
     }
   };
@@ -182,7 +222,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   };
 
   const updateDivisions = (axis: 'columns' | 'rows', value: number) => {
-    if (isProcessing) return;
+    if (busyRef.current || isBusy) return;
     clearResults();
     setErrorMessage('');
     if (axis === 'columns') setColumns(clampDivision(value));
@@ -191,7 +231,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
 
   const splitImages = async () => {
     const canvas = canvasRef.current;
-    if (!canvas || images.length === 0 || isProcessing) return;
+    if (!canvas || images.length === 0 || busyRef.current || isBusy) return;
 
     if (columns === 1 && rows === 1) {
       setErrorMessage('가로 또는 세로 분할 값을 2 이상으로 입력해 주세요.');
@@ -205,6 +245,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
 
     const signal = beginTask();
     if (!signal) return;
+    busyRef.current = true;
     setIsProcessing(true);
     clearResults();
     setErrorMessage('');
@@ -296,6 +337,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
         setErrorMessage('이미지를 자르는 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
       }
     } finally {
+      busyRef.current = false;
       setIsProcessing(false);
       setProgressMessage('');
       finishTask();
@@ -313,12 +355,22 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
     });
   };
 
+  const sendResultsToDiscord = async (requestId: string, selectedResults: SplitResult[]) => {
+    if (busyRef.current || isBusy) return;
+    busyRef.current = true;
+    try {
+      await sendToDiscord(requestId, selectedResults.map((result) => ({ url: result.url, name: result.fileName })));
+    } finally {
+      busyRef.current = false;
+    }
+  };
+
   const sendResultToDiscord = (result: SplitResult) => {
-    void sendToDiscord(result.id, [{ url: result.url, name: result.fileName }]);
+    void sendResultsToDiscord(result.id, [result]);
   };
 
   const sendAllToDiscord = () => {
-    void sendToDiscord('all', results.map((result) => ({ url: result.url, name: result.fileName })));
+    void sendResultsToDiscord('all', results);
   };
 
   const totalParts = images.length * columns * rows;
@@ -326,6 +378,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
 
   return (
     <div className="space-y-8">
+      {isLoading && images.length > 0 && <p role="status" className="text-xs text-purple-300">이미지 불러오는 중...</p>}
       {images.length === 0 ? (
         <div
           onDragEnter={(event) => {
@@ -360,6 +413,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
               accept="image/jpeg,image/png,image/webp,image/gif"
               multiple
               onChange={handleFileChange}
+              disabled={isBusy}
               className="hidden"
             />
           </label>
@@ -380,7 +434,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
               <button
                 type="button"
                 onClick={reset}
-                disabled={isProcessing}
+                disabled={isBusy}
                 className="flex items-center gap-1 text-xs text-purple-400 transition hover:text-purple-300 disabled:opacity-50"
               >
                 <RefreshCw className="h-3 w-3" />
@@ -424,7 +478,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                     step={1}
                     value={columns}
                     onChange={(event) => updateDivisions('columns', Number(event.target.value))}
-                    disabled={isProcessing}
+                    disabled={isBusy}
                     className="w-full rounded-xl border border-purple-500/30 bg-[#121318] px-4 py-3 text-center text-lg font-semibold outline-none transition focus:border-purple-500 disabled:opacity-50"
                   />
                   <span className="mt-1 block text-center text-[10px] text-gray-500">열 개수</span>
@@ -441,7 +495,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                     step={1}
                     value={rows}
                     onChange={(event) => updateDivisions('rows', Number(event.target.value))}
-                    disabled={isProcessing}
+                    disabled={isBusy}
                     className="w-full rounded-xl border border-purple-500/30 bg-[#121318] px-4 py-3 text-center text-lg font-semibold outline-none transition focus:border-purple-500 disabled:opacity-50"
                   />
                   <span className="mt-1 block text-center text-[10px] text-gray-500">행 개수</span>
@@ -469,7 +523,8 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                 <button
                   type="button"
                   onClick={splitImages}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 py-4 font-medium shadow-lg shadow-purple-500/10 transition duration-300 hover:from-purple-500 hover:to-indigo-500 hover:shadow-purple-500/25"
+                  disabled={isBusy}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 py-4 font-medium shadow-lg shadow-purple-500/10 transition duration-300 hover:from-purple-500 hover:to-indigo-500 hover:shadow-purple-500/25 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Sparkles className="h-5 w-5" />
                   {totalParts}개 이미지 조각 만들기
@@ -497,7 +552,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                     <button
                       type="button"
                       onClick={sendAllToDiscord}
-                      disabled={activeRequestId !== null}
+                      disabled={isBusy}
                       className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {activeRequestId === 'all' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
@@ -508,6 +563,15 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
 
                 <DiscordSendStatus status={discordStatus} />
 
+                {results.length > 1 && (
+                  <ResultActions
+                    assets={results.map((result) => ({ url: result.url, name: result.fileName }))}
+                    disabled={isBusy}
+                    exclude={['split']}
+                    label="모든 결과 이어 편집"
+                  />
+                )}
+
                 <div className="flex items-center justify-between rounded-xl border border-white/5 bg-black/20 px-3 py-2 text-xs text-gray-400">
                   <span>{results.length}개 조각</span>
                   <span className="text-green-300">{formatBytes(totalResultSize)}</span>
@@ -515,7 +579,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
 
                 <div className="max-h-[460px] space-y-3 overflow-y-auto pr-1">
                   {results.map((result) => (
-                    <div key={result.id} className="flex items-center gap-3 rounded-xl border border-white/5 bg-black/30 p-2">
+                    <div key={result.id} className="flex flex-wrap items-center gap-3 rounded-xl border border-white/5 bg-black/30 p-2">
                       <img src={result.url} alt={result.fileName} className="h-14 w-14 rounded bg-black/40 object-contain" />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-xs text-gray-300" title={result.fileName}>{result.fileName}</p>
@@ -537,7 +601,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                         <button
                           type="button"
                           onClick={() => sendResultToDiscord(result)}
-                          disabled={activeRequestId !== null}
+                          disabled={isBusy}
                           className="rounded-lg bg-indigo-600 p-2 transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
                           aria-label={`${result.fileName} Discord로 보내기`}
                           title="Discord로 보내기"
@@ -546,6 +610,14 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                             ? <Loader2 className="h-4 w-4 animate-spin" />
                             : <Send className="h-4 w-4" />}
                         </button>
+                      </div>
+                      <div className="w-full">
+                        <ResultActions
+                          assets={[{ url: result.url, name: result.fileName }]}
+                          disabled={isBusy}
+                          exclude={['split']}
+                          label={`${result.fileName} 이어 편집`}
+                        />
                       </div>
                     </div>
                   ))}

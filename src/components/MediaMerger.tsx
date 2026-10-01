@@ -23,6 +23,8 @@ import type { MergeDirection, MergeMode, MergeSource } from '@/lib/mediaMerger';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
+import { useMediaReceiver } from '@/hooks/useMediaTransfer';
+import { ResultActions } from './ResultActions';
 
 interface MediaMergerProps {
   onSuccess: (size: number) => void;
@@ -176,6 +178,66 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
       }
     }
   };
+
+  useMediaReceiver('merge', async (files: File[]) => {
+    if (operationRef.current || busy) {
+      throw new Error('합치기 도구가 파일을 불러오거나 처리·전송 중입니다. 작업이 끝난 뒤 다시 추가해 주세요.');
+    }
+    if (!files.length) throw new Error('합치기에 추가할 파일이 없습니다.');
+
+    operationRef.current = true;
+    setIsLoading(true);
+    const generation = generationRef.current;
+    const pendingUrls: string[] = [];
+    const isCurrent = () => mountedRef.current && generation === generationRef.current;
+    const ensureCurrent = () => {
+      if (!isCurrent()) throw new Error('합치기 화면이 변경되어 파일을 추가하지 못했습니다. 다시 시도해 주세요.');
+    };
+
+    try {
+      ensureCurrent();
+      const incomingModes = await Promise.all(files.map(async (file): Promise<MergeMode> => {
+        const header = new Uint8Array(await file.slice(0, 6).arrayBuffer());
+        const signature = String.fromCharCode(...header);
+        const incomingMode = signature === 'GIF87a' || signature === 'GIF89a' ? 'gif' : 'image';
+        await validateMergeFile(file, incomingMode);
+        return incomingMode;
+      }));
+      ensureCurrent();
+
+      const incomingMode = incomingModes[0];
+      if (incomingModes.some((itemMode) => itemMode !== incomingMode)) {
+        throw new Error('GIF와 정지 이미지는 함께 추가할 수 없습니다. 같은 종류의 결과만 선택해 주세요.');
+      }
+      if (sources.length && mode !== incomingMode) {
+        throw new Error(`현재 합치기 목록에는 ${mode === 'gif' ? 'GIF' : '정지 이미지'}만 추가할 수 있습니다. 기존 목록을 유지했으니 같은 종류의 결과를 선택해 주세요.`);
+      }
+
+      const additions: SourceItem[] = [];
+      for (const file of files) {
+        ensureCurrent();
+        const url = URL.createObjectURL(file);
+        pendingUrls.push(url);
+        inputUrlsRef.current.add(url);
+        const dimensions = await loadDimensions(url);
+        ensureCurrent();
+        additions.push({ id: `source-${++nextIdRef.current}`, file, url, ...dimensions });
+      }
+
+      ensureCurrent();
+      if (!sources.length) setMode(incomingMode);
+      setSources((current) => [...current, ...additions]);
+      setErrorMessage('');
+      pendingUrls.length = 0;
+    } finally {
+      pendingUrls.forEach((url) => {
+        URL.revokeObjectURL(url);
+        inputUrlsRef.current.delete(url);
+      });
+      operationRef.current = false;
+      if (isCurrent()) setIsLoading(false);
+    }
+  });
 
   const removeSource = (id: string) => {
     if (operationRef.current || busy) return;
@@ -422,7 +484,7 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
             {result && (
               <div className="glass-panel space-y-4 rounded-2xl border border-green-500/20 p-5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="flex items-center gap-2 text-sm font-semibold text-green-400"><CheckCircle2 className="h-4 w-4" />합치기 완료</h3>
+                  <h3 className="flex items-center gap-2 text-sm font-semibold text-green-400"><CheckCircle2 className="h-4 w-4" />마지막 합치기 결과</h3>
                   <span className="text-xs text-gray-400">{result.width} × {result.height}px · {formatBytes(result.size)}</span>
                 </div>
                 <div className="flex items-center justify-center overflow-hidden rounded-xl p-2" style={checkerboard}>
@@ -435,6 +497,7 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
                     Discord로 보내기
                   </button>
                 </div>
+                <ResultActions assets={[{ url: result.url, name: result.fileName }]} disabled={busy} exclude={['merge']} />
                 {sentResultId === result.id && <DiscordSendStatus status={discordStatus} />}
               </div>
             )}

@@ -4,10 +4,13 @@ import { ImageEditor } from './components/ImageEditor';
 import { DiscordWebhookField } from './components/DiscordWebhookField';
 import { DiscordUrlFormatter } from './components/DiscordUrlFormatter';
 import { getDiscordWebhookFromSearch, getStoredDiscordWebhooks } from './lib/discordWebhook';
+import { MediaTransferProvider } from './hooks/useMediaTransfer';
+import type { EditorMode } from './components/ImageEditor';
 import { Film, Images, Link2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
 function App() {
   const [activeTab, setActiveTab] = useState<'video' | 'editor' | 'formatter'>('editor');
+  const [editorMode, setEditorMode] = useState<EditorMode>('resize');
   const discordWebhookFromUrl = getDiscordWebhookFromSearch(window.location.search);
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(
     () => discordWebhookFromUrl || getStoredDiscordWebhooks()[0] || '',
@@ -25,6 +28,11 @@ function App() {
   };
 
   return (
+    <MediaTransferProvider onNavigate={(target) => {
+      setEditorMode(target);
+      setActiveTab('editor');
+      requestAnimationFrame(() => document.getElementById('editor-panel')?.scrollIntoView({ block: 'start' }));
+    }}>
     <div className="min-h-screen gradient-bg flex flex-col justify-between">
       {/* Top Banner / Header */}
       <header className="border-b border-white/5 bg-[#0b0c10]/40 backdrop-blur-md sticky top-0 z-40">
@@ -134,8 +142,8 @@ function App() {
           <div id="video-panel" hidden={activeTab !== 'video'}>
             <VideoToGif onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} isActive={activeTab === 'video'} />
           </div>
-          <div id="editor-panel" hidden={activeTab !== 'editor'}>
-            <ImageEditor onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} />
+          <div id="editor-panel" hidden={activeTab !== 'editor'} className="scroll-mt-24">
+            <ImageEditor onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} mode={editorMode} onModeChange={setEditorMode} />
           </div>
         </div>
 
@@ -196,6 +204,7 @@ function App() {
         </div>
       </footer>
     </div>
+    </MediaTransferProvider>
   );
 }
 

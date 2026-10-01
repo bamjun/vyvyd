@@ -17,6 +17,7 @@ import { processGifFilters } from '@/lib/gifProcessing';
 import { formatBytes } from '@/lib/utils';
 import { CropOverlay } from './CropOverlay';
 import { DiscordSendStatus } from './DiscordSendStatus';
+import { ResultActions } from './ResultActions';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
@@ -467,6 +468,11 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
                 Discord로 보내기
               </button>
             </div>
+            <ResultActions
+              assets={[{ url: result.url, name: result.fileName }]}
+              disabled={isProcessing}
+              label={`${result.fileName} 이어 편집`}
+            />
           </div>
         )}
       </div>

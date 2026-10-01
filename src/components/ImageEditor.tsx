@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React from 'react';
+import { useMediaTransfer } from '@/hooks/useMediaTransfer';
 import { Crop, Frame, Images, Minimize2, PanelsTopLeft, Scissors } from 'lucide-react';
 import { ImageCropper } from './ImageCropper';
 import { ImagePadding } from './ImagePadding';
@@ -9,12 +10,14 @@ import { MediaMerger } from './MediaMerger';
 interface ImageEditorProps {
   onSuccess: (size: number) => void;
   discordWebhookUrl: string;
+  mode: EditorMode;
+  onModeChange: (mode: EditorMode) => void;
 }
 
-type EditorMode = 'padding' | 'resize' | 'split' | 'crop' | 'merge';
+export type EditorMode = 'padding' | 'resize' | 'split' | 'crop' | 'merge';
 
-export const ImageEditor: React.FC<ImageEditorProps> = ({ onSuccess, discordWebhookUrl }) => {
-  const [mode, setMode] = useState<EditorMode>('resize');
+export const ImageEditor: React.FC<ImageEditorProps> = ({ onSuccess, discordWebhookUrl, mode, onModeChange: setMode }) => {
+  const { notice } = useMediaTransfer();
 
   return (
     <div className="relative space-y-8">
@@ -92,6 +95,8 @@ export const ImageEditor: React.FC<ImageEditorProps> = ({ onSuccess, discordWebh
           </button>
         </div>
       </div>
+
+      {notice?.target === mode && <p role="status" className="rounded-xl border border-purple-500/20 bg-purple-500/10 p-3 text-sm text-purple-200">{notice.message}</p>}
 
       <div className={mode === 'padding' ? 'block' : 'hidden'}>
         <ImagePadding onSuccess={onSuccess} discordWebhookUrl={discordWebhookUrl} />
