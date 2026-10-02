@@ -1,8 +1,10 @@
 import { clampVideoCrop } from './videoGeometry';
 import type { VideoCrop, VideoFitMode, VideoSize } from './videoGeometry';
+import type { CropPreset } from './cropPresets';
 
 export interface VideoEditSettings {
   crop: VideoCrop;
+  cropPreset: CropPreset;
   startTime: number;
   endTime: number;
   outputWidth: string;
@@ -14,6 +16,7 @@ export interface VideoEditSettings {
 
 export const createVideoSettings = (source: VideoSize & { duration: number }): VideoEditSettings => ({
   crop: { x: 0, y: 0, width: source.width, height: source.height },
+  cropPreset: 'free',
   startTime: 0,
   endTime: Math.min(source.duration, 4),
   outputWidth: String(Math.max(1, Math.round(source.width * 0.75))),

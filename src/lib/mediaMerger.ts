@@ -3,6 +3,13 @@ import { throwIfAborted } from '@/lib/cancellation';
 
 export type MergeMode = 'image' | 'gif';
 export type MergeDirection = 'horizontal' | 'vertical';
+export type MergeFit = 'original' | 'match';
+export type MergeAlignment = 'start' | 'center' | 'end';
+
+export interface MergeOptions {
+  fit?: MergeFit;
+  alignment?: MergeAlignment;
+}
 
 export interface MergeSource {
   file: File;
@@ -30,29 +37,49 @@ const MAX_PIXELS = 32_000_000;
 export const getMergeLayout = (
   sources: { width: number; height: number }[],
   direction: MergeDirection,
+  options: MergeOptions = {},
 ): MergeLayout => {
-  let width = 0;
-  let height = 0;
-  const items = sources.map((source) => {
+  const { fit = 'original', alignment = 'start' } = options;
+  if (!['horizontal', 'vertical'].includes(direction)
+    || !['original', 'match'].includes(fit)
+    || !['start', 'center', 'end'].includes(alignment)) {
+    throw new Error('합치기 방향·크기 맞춤·정렬 설정을 확인해 주세요.');
+  }
+  for (const source of sources) {
     if (!Number.isSafeInteger(source.width) || !Number.isSafeInteger(source.height)
       || source.width <= 0 || source.height <= 0) {
       throw new Error('이미지 크기를 확인할 수 없습니다. 다른 파일을 선택해 주세요.');
     }
-
+  }
+  const crossDimension = direction === 'horizontal' ? 'height' : 'width';
+  const commonSize = sources.reduce((minimum, source) => Math.min(minimum, source[crossDimension]), Infinity);
+  let width = 0;
+  let height = 0;
+  const items = sources.map((source) => {
+    const scale = fit === 'match' ? commonSize / source[crossDimension] : 1;
+    const itemWidth = Math.max(1, Math.round(source.width * scale));
+    const itemHeight = Math.max(1, Math.round(source.height * scale));
     const item = {
       x: direction === 'horizontal' ? width : 0,
       y: direction === 'vertical' ? height : 0,
-      width: source.width,
-      height: source.height,
+      width: itemWidth,
+      height: itemHeight,
     };
-    width = direction === 'horizontal' ? width + source.width : Math.max(width, source.width);
-    height = direction === 'vertical' ? height + source.height : Math.max(height, source.height);
+    width = direction === 'horizontal' ? width + itemWidth : Math.max(width, itemWidth);
+    height = direction === 'vertical' ? height + itemHeight : Math.max(height, itemHeight);
 
     if (width > MAX_EDGE || height > MAX_EDGE || width * height > MAX_PIXELS) {
       throw new Error('합친 크기가 너무 큽니다. 가로·세로 16,384px, 총 3,200만 픽셀 이하로 줄여 주세요.');
     }
     return item;
   });
+
+  for (const item of items) {
+    const gap = direction === 'horizontal' ? height - item.height : width - item.width;
+    const offset = alignment === 'center' ? Math.floor(gap / 2) : alignment === 'end' ? gap : 0;
+    if (direction === 'horizontal') item.y = offset;
+    else item.x = offset;
+  }
 
   return { width, height, items };
 };
@@ -102,18 +129,22 @@ export const mergeMedia = async (
   direction: MergeDirection,
   onProgress?: (message: string) => void,
   signal?: AbortSignal,
+  options: MergeOptions = {},
 ): Promise<Blob> => {
   throwIfAborted(signal);
   if (sources.length < 2) {
     throw new Error('합칠 파일을 2개 이상 추가해 주세요.');
   }
 
-  const layout = getMergeLayout(sources, direction);
+  const layout = getMergeLayout(sources, direction, options);
   await Promise.all(sources.map((source) => validateMergeFile(source.file, mode)));
   throwIfAborted(signal);
 
   if (mode === 'gif') {
-    return mergeGifFiles(sources.map((source) => source.file), layout.items, onProgress, signal);
+    const positions = layout.items.map((item, index) => ({
+      ...item, sourceWidth: sources[index].width, sourceHeight: sources[index].height,
+    }));
+    return mergeGifFiles(sources.map((source) => source.file), positions, onProgress, signal);
   }
 
   const canvas = document.createElement('canvas');
@@ -123,6 +154,8 @@ export const mergeMedia = async (
   try {
     const context = canvas.getContext('2d');
     if (!context) throw new Error('이미지 작업 공간을 만들 수 없습니다.');
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
 
     // Decode and draw one source at a time to avoid retaining every decoded image.
     for (let index = 0; index < sources.length; index += 1) {
@@ -131,10 +164,10 @@ export const mergeMedia = async (
       const image = await loadImage(sources[index], signal);
       throwIfAborted(signal);
       const item = layout.items[index];
-      if (image.naturalWidth !== item.width || image.naturalHeight !== item.height) {
+      if (image.naturalWidth !== sources[index].width || image.naturalHeight !== sources[index].height) {
         throw new Error('이미지 크기가 변경되었습니다. 파일을 다시 추가해 주세요.');
       }
-      context.drawImage(image, item.x, item.y);
+      context.drawImage(image, item.x, item.y, item.width, item.height);
     }
 
     onProgress?.('PNG 파일을 만드는 중...');

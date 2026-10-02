@@ -3,6 +3,9 @@ import { formatBytes } from '@/lib/utils';
 import { Film, Download, DownloadCloud, Sparkles, AlertCircle, RefreshCw, Loader2, Send } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { CropOverlay } from './CropOverlay';
+import { CropPresetControls } from './CropPresetControls';
+import { centerCrop, constrainCrop, getPresetAspectRatio, getPresetCrop } from '@/lib/cropPresets';
+import type { CropPreset } from '@/lib/cropPresets';
 import { DiscordSendStatus } from './DiscordSendStatus';
 import { ResultActions } from './ResultActions';
 import { convertVideoToGif } from '@/lib/convertVideo';
@@ -107,7 +110,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
   const selectedVideo = videoItems.find((item) => item.id === selectedVideoId) ?? videoItems[0];
   const settings = selectedVideo?.settings ?? EMPTY_SETTINGS;
-  const { crop, startTime, endTime, outputWidth, outputHeight, scale, aspectLocked, fitMode } = settings;
+  const { crop, cropPreset = 'free', startTime, endTime, outputWidth, outputHeight, scale, aspectLocked, fitMode } = settings;
   const targetBytes = parseTargetSize(targetValue, targetUnit);
   const invalidSizeTarget = targetEnabled && targetBytes === null;
 
@@ -202,13 +205,28 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
 
   const resetCrop = () => {
     if (!selectedVideo) return;
-    handleCropChange({ x: 0, y: 0, width: selectedVideo.width, height: selectedVideo.height });
+    updateSelectedSettings((current) => changeVideoCrop(
+      { ...current, cropPreset: 'free' },
+      { x: 0, y: 0, width: selectedVideo.width, height: selectedVideo.height }, selectedVideo,
+    ));
+  };
+
+  const applyCropPreset = (preset: CropPreset) => {
+    if (!selectedVideo) return;
+    updateSelectedSettings((current) => changeVideoCrop(
+      { ...current, cropPreset: preset, aspectLocked: preset === 'free' ? current.aspectLocked : true },
+      preset === 'free' ? current.crop : getPresetCrop(selectedVideo, preset), selectedVideo,
+    ));
   };
 
   const updateCropField = (field: keyof VideoCrop, value: string) => {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) return;
-    handleCropChange({ ...crop, [field]: numericValue });
+    if (!selectedVideo) return;
+    handleCropChange(constrainCrop(
+      { ...crop, [field]: numericValue }, selectedVideo, getPresetAspectRatio(cropPreset),
+      field === 'width' || field === 'height' ? field : undefined,
+    ));
   };
 
   const applyOutputToAll = () => {
@@ -459,6 +477,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                       crop={crop}
                       setCrop={handleCropChange}
                       mediaRef={videoRef}
+                      aspectRatio={getPresetAspectRatio(cropPreset)}
                     />
                   )}
                 </div>
@@ -528,6 +547,9 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
 
                 <div>
                   <label className="block text-xs font-semibold uppercase text-gray-400 mb-2">Crop Area (source px)</label>
+                  <div className="mb-4">
+                    <CropPresetControls preset={cropPreset} onPresetChange={applyCropPreset} onCenter={() => handleCropChange(centerCrop(crop, selectedVideo))} disabled={isProcessing} />
+                  </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label htmlFor="video-crop-x" className="text-xs text-gray-500 block mb-1">X</label>

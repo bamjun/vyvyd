@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { centerCrop, constrainCrop, CropDragMode, getDraggedCrop } from '@/lib/cropPresets';
 
 interface CropOverlayProps {
   mediaWidth: number;
@@ -6,12 +7,11 @@ interface CropOverlayProps {
   crop: { x: number; y: number; width: number; height: number };
   setCrop: (crop: { x: number; y: number; width: number; height: number }) => void;
   mediaRef: React.RefObject<HTMLElement>;
+  aspectRatio?: number;
 }
 
-type DragMode = 'create' | 'move' | 't' | 'b' | 'l' | 'r' | 'tl' | 'tr' | 'bl' | 'br';
-
 interface DragState {
-  mode: DragMode;
+  mode: CropDragMode;
   startClientX: number;
   startClientY: number;
   startCrop: { x: number; y: number; width: number; height: number };
@@ -30,6 +30,7 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
   crop,
   setCrop,
   mediaRef,
+  aspectRatio,
 }) => {
   const [mediaRect, setMediaRect] = useState<MediaRect>({ width: 0, height: 0 });
   const dragRef = useRef<DragState | null>(null);
@@ -81,7 +82,7 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
     };
   };
 
-  const beginDrag = (event: React.PointerEvent<HTMLDivElement>, mode: DragMode) => {
+  const beginDrag = (event: React.PointerEvent<HTMLDivElement>, mode: CropDragMode) => {
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -94,7 +95,7 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
         startClientY: event.clientY,
         startCrop: { x: point.x, y: point.y, width: 0, height: 0 },
       };
-      setCrop({ x: Math.round(point.x), y: Math.round(point.y), width: 0, height: 0 });
+      setCrop(getDraggedCrop(dragRef.current.startCrop, { width: mediaWidth, height: mediaHeight }, 'create', { x: 0, y: 0 }, aspectRatio));
       return;
     }
 
@@ -114,45 +115,7 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
 
     const dx = (event.clientX - drag.startClientX) / scaleX;
     const dy = (event.clientY - drag.startClientY) / scaleY;
-    const start = drag.startCrop;
-    const minSize = Math.min(20, mediaWidth, mediaHeight);
-    let next = { ...start };
-
-    if (drag.mode === 'create') {
-      const point = getNaturalPoint(event.clientX, event.clientY);
-      next = {
-        x: Math.min(start.x, point.x),
-        y: Math.min(start.y, point.y),
-        width: Math.abs(point.x - start.x),
-        height: Math.abs(point.y - start.y),
-      };
-    } else if (drag.mode === 'move') {
-      next.x = clamp(start.x + dx, 0, mediaWidth - start.width);
-      next.y = clamp(start.y + dy, 0, mediaHeight - start.height);
-    } else {
-      if (drag.mode.includes('l')) {
-        const nextX = clamp(start.x + dx, 0, start.x + start.width - minSize);
-        next.x = nextX;
-        next.width = start.width + start.x - nextX;
-      } else if (drag.mode.includes('r')) {
-        next.width = clamp(start.width + dx, minSize, mediaWidth - start.x);
-      }
-
-      if (drag.mode.includes('t')) {
-        const nextY = clamp(start.y + dy, 0, start.y + start.height - minSize);
-        next.y = nextY;
-        next.height = start.height + start.y - nextY;
-      } else if (drag.mode.includes('b')) {
-        next.height = clamp(start.height + dy, minSize, mediaHeight - start.y);
-      }
-    }
-
-    setCrop({
-      x: Math.round(clamp(next.x, 0, mediaWidth)),
-      y: Math.round(clamp(next.y, 0, mediaHeight)),
-      width: Math.round(clamp(next.width, 0, mediaWidth)),
-      height: Math.round(clamp(next.height, 0, mediaHeight)),
-    });
+    setCrop(getDraggedCrop(drag.startCrop, { width: mediaWidth, height: mediaHeight }, drag.mode, { x: dx, y: dy }, aspectRatio));
   };
 
   const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -165,7 +128,8 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
     }
 
     if (drag.mode === 'create' && (crop.width < 15 || crop.height < 15)) {
-      setCrop({ x: 0, y: 0, width: mediaWidth, height: mediaHeight });
+      const source = { width: mediaWidth, height: mediaHeight };
+      setCrop(centerCrop(constrainCrop({ x: 0, y: 0, ...source }, source, aspectRatio), source));
     }
     dragRef.current = null;
   };

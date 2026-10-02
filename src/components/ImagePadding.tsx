@@ -9,6 +9,8 @@ import { processGifFilters } from '@/lib/gifProcessing';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
+import { useMediaTransfer } from '@/hooks/useMediaTransfer';
+import { getImagePaddingLayout, type ImagePaddingAlignment } from '@/lib/imagePadding';
 
 interface ImagePaddingProps {
   onSuccess: (size: number) => void;
@@ -35,14 +37,6 @@ interface ImageResult {
   width: number;
   height: number;
 }
-
-const getOutputDimensions = (width: number, height: number) => ({
-  width,
-  height,
-  // Keep the original width and place the original at the top of a 9:16 canvas.
-  // max() keeps unusually tall images from being cropped.
-  outputHeight: Math.max(Math.ceil((width * 16) / 9), height),
-});
 
 const canvasToBlob = (canvas: HTMLCanvasElement): Promise<Blob> =>
   new Promise((resolve, reject) => {
@@ -71,6 +65,7 @@ const getOutputFileName = (fileName: string, isGif: boolean) =>
 export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWebhookUrl }) => {
   const [imageItems, setImageItems] = useState<ImageItem[]>([]);
   const [background, setBackground] = useState<BackgroundMode>('transparent');
+  const [alignment, setAlignment] = useState<ImagePaddingAlignment>('top');
   const [isLoadingImages, setIsLoadingImages] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressIndex, setProgressIndex] = useState(0);
@@ -83,6 +78,8 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   const resultUrlsRef = useRef<Set<string>>(new Set());
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
+  const { busy: isTransferring } = useMediaTransfer();
+  const isBusy = isLoadingImages || isProcessing || activeRequestId !== null || isTransferring;
 
   useEffect(() => {
     return () => {
@@ -97,7 +94,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   };
 
   const reset = () => {
-    if (isProcessing) return;
+    if (isBusy) return;
     clearUrls(imageUrlsRef.current);
     clearUrls(resultUrlsRef.current);
     setImageItems([]);
@@ -108,10 +105,28 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
     setCancellationMessage('');
   };
 
+  const clearResults = () => {
+    clearUrls(resultUrlsRef.current);
+    setResults([]);
+    setCancellationMessage('');
+  };
+
+  const changeAlignment = (next: ImagePaddingAlignment) => {
+    if (isBusy || next === alignment) return;
+    clearResults();
+    setAlignment(next);
+  };
+
+  const changeBackground = (next: BackgroundMode) => {
+    if (isBusy || next === background) return;
+    clearResults();
+    setBackground(next);
+  };
+
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(event.target.files ?? []);
     const files = selectedFiles.filter((file) => SUPPORTED_TYPES.has(file.type));
-    if (files.length === 0 || isProcessing) return;
+    if (files.length === 0 || isBusy) return;
 
     reset();
     setIsLoadingImages(true);
@@ -123,7 +138,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
           const src = URL.createObjectURL(file);
           imageUrlsRef.current.add(src);
           const image = await loadImage(src);
-          const dimensions = getOutputDimensions(image.naturalWidth, image.naturalHeight);
+          const dimensions = getImagePaddingLayout(image.naturalWidth, image.naturalHeight);
 
           return {
             id: `${file.name}-${file.lastModified}-${index}`,
@@ -153,7 +168,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
 
   const createPaddedImages = async () => {
     const canvas = canvasRef.current;
-    if (!canvas || imageItems.length === 0 || isProcessing) return;
+    if (!canvas || imageItems.length === 0 || isBusy) return;
 
     const signal = beginTask();
     if (!signal) return;
@@ -173,6 +188,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
       for (let index = 0; index < imageItems.length; index += 1) {
         throwIfAborted(signal);
         const item = imageItems[index];
+        const layout = getImagePaddingLayout(item.width, item.height, alignment);
         setProgressIndex(index + 1);
         setProgressMessage(`${item.file.name} 처리 중...`);
 
@@ -183,15 +199,15 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
           const paddingColor = background === 'white' ? 'white' : '0x00000000';
           [blob] = await processGifFilters(
             item.file,
-            [`pad=${item.width}:${item.outputHeight}:0:0:color=${paddingColor}`],
+            [`pad=${layout.width}:${layout.outputHeight}:${layout.x}:${layout.y}:color=${paddingColor}`],
             setProgressMessage,
             signal,
           );
         } else {
           const image = await loadImage(item.src);
           throwIfAborted(signal);
-          canvas.width = item.width;
-          canvas.height = item.outputHeight;
+          canvas.width = layout.width;
+          canvas.height = layout.outputHeight;
           context.clearRect(0, 0, canvas.width, canvas.height);
 
           if (background === 'white') {
@@ -199,7 +215,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
             context.fillRect(0, 0, canvas.width, canvas.height);
           }
 
-          context.drawImage(image, 0, 0, item.width, item.height);
+          context.drawImage(image, layout.x, layout.y, layout.width, layout.height);
           blob = await canvasToBlob(canvas);
         }
 
@@ -263,7 +279,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   const outputLabel = firstItem
     ? `${firstItem.width} × ${firstItem.outputHeight}px`
     : '원본을 선택하면 자동 계산됩니다';
-  const hasExtraHeight = imageItems.some((item) => item.outputHeight > item.width * (16 / 9));
+  const hasExtraHeight = imageItems.some((item) => item.height > Math.ceil(item.width * (16 / 9)));
 
   return (
     <div className="space-y-8">
@@ -272,11 +288,11 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
           <ImagePlus className="w-16 h-16 text-purple-400 mb-4 animate-pulse" />
           <h3 className="text-xl font-medium mb-1">Upload Images</h3>
           <p className="text-gray-400 text-sm mb-6 text-center max-w-sm">
-            여러 이미지와 GIF를 한 번에 선택하면 원본을 상단에 배치하고 아래 빈 공간을 추가해 9:16으로 변환합니다.
+            여러 이미지와 GIF에 빈 공간을 추가해 9:16으로 변환합니다. 원본을 상단·중앙·하단에 배치할 수 있습니다.
           </p>
           <label className="px-6 py-3 bg-purple-600 hover:bg-purple-700 font-medium rounded-xl cursor-pointer shadow-lg hover:shadow-purple-500/20 transition">
             Choose Image Files
-            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple onChange={handleFileChange} className="hidden" />
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple onChange={handleFileChange} disabled={isBusy} className="hidden" />
           </label>
           <p className="mt-3 text-[11px] text-gray-500">JPG, PNG, WebP, GIF</p>
           {isLoadingImages && <p className="text-xs text-purple-300 mt-4">이미지 불러오는 중...</p>}
@@ -294,7 +310,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
               </div>
               <button
                 onClick={reset}
-                disabled={isProcessing}
+                disabled={isBusy}
                 className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50 flex items-center space-x-1"
               >
                 <RefreshCw className="w-3 h-3" />
@@ -304,15 +320,33 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
 
             <div className="rounded-2xl overflow-hidden glass-panel p-4 min-h-[300px] max-h-[500px] overflow-y-auto">
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {imageItems.map((item) => (
+                {imageItems.map((item) => {
+                  const layout = getImagePaddingLayout(item.width, item.height, alignment);
+                  return (
                   <div key={item.id} className="rounded-xl bg-[#252733] border border-white/10 p-2 space-y-2">
-                    <div className="aspect-square rounded-lg overflow-hidden bg-black/30 flex items-center justify-center">
-                      <img src={item.src} alt={item.file.name} className="max-h-full max-w-full object-contain" />
+                    <div
+                      className="relative w-full rounded-lg overflow-hidden"
+                      aria-label={`${item.file.name} 배치 미리보기`}
+                      style={{
+                        aspectRatio: `${layout.width} / ${layout.outputHeight}`,
+                        backgroundColor: background === 'white' ? '#ffffff' : '#31333e',
+                        backgroundImage: background === 'transparent'
+                          ? 'repeating-conic-gradient(#31333e 0% 25%, #454754 0% 50%)' : undefined,
+                        backgroundSize: '12px 12px',
+                      }}
+                    >
+                      <img
+                        src={item.src}
+                        alt={item.file.name}
+                        className="absolute left-0 block w-full"
+                        style={{ top: `${(layout.y / layout.outputHeight) * 100}%`, height: `${(layout.height / layout.outputHeight) * 100}%` }}
+                      />
                     </div>
                     <p className="text-xs text-gray-300 truncate" title={item.file.name}>{item.file.name}</p>
-                    <p className="text-[10px] text-gray-500">{item.width} × {item.height}px</p>
+                    <p className="text-[10px] text-gray-500">{item.width} × {item.height}px → {item.width} × {layout.outputHeight}px</p>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
             <div className="text-xs text-gray-500 flex justify-between px-1">
@@ -335,11 +369,34 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
 
               <div className="space-y-5">
                 <div>
+                  <span className="block text-xs font-semibold text-gray-400 mb-2">이미지 배치</span>
+                  <div role="group" aria-label="이미지 배치" className="grid grid-cols-3 gap-2">
+                    {([
+                      ['top', '상단'], ['center', '중앙'], ['bottom', '하단'],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={alignment === value}
+                        onClick={() => changeAlignment(value)}
+                        disabled={isBusy}
+                        className={`rounded-xl border px-3 py-2 text-sm transition ${alignment === value
+                          ? 'border-purple-500 bg-purple-500/15 text-purple-300'
+                          : 'border-white/10 bg-white/5 text-gray-400 hover:text-gray-200'} disabled:opacity-50`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-gray-500 mt-2">원본 크기는 유지됩니다. 중앙 배치는 위·아래 여백을 균등하게 나눕니다.</p>
+                </div>
+                <div>
                   <label className="block text-xs font-semibold uppercase text-gray-400 mb-2">Empty Area</label>
                   <div className="grid grid-cols-2 gap-3">
                     <button
-                      onClick={() => setBackground('transparent')}
-                      disabled={isProcessing}
+                      onClick={() => changeBackground('transparent')}
+                      disabled={isBusy}
+                      aria-pressed={background === 'transparent'}
                       className={`rounded-xl border px-3 py-2 text-sm transition ${
                         background === 'transparent'
                           ? 'border-purple-500 bg-purple-500/15 text-purple-300'
@@ -349,8 +406,9 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                       Transparent
                     </button>
                     <button
-                      onClick={() => setBackground('white')}
-                      disabled={isProcessing}
+                      onClick={() => changeBackground('white')}
+                      disabled={isBusy}
+                      aria-pressed={background === 'white'}
                       className={`rounded-xl border px-3 py-2 text-sm transition ${
                         background === 'white'
                           ? 'border-purple-500 bg-purple-500/15 text-purple-300'
@@ -370,7 +428,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                     <span className="text-gray-400">Selected files</span>
                     <span className="text-purple-300 font-mono">{imageItems.length}</span>
                   </div>
-                  <p className="text-xs text-gray-500">모든 이미지는 원본 가로 폭을 유지하고 캔버스의 가장 위에 배치됩니다.</p>
+                  <p className="text-xs text-gray-500">모든 이미지는 원본 크기를 유지하고 선택한 위치에 배치됩니다. 설정을 바꾸면 새로 변환해 주세요.</p>
                 </div>
               </div>
 
@@ -386,7 +444,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
               ) : (
                 <button
                   onClick={createPaddedImages}
-                  disabled={isLoadingImages || imageItems.length === 0}
+                  disabled={isBusy || imageItems.length === 0}
                   className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition duration-300 flex items-center justify-center space-x-2"
                 >
                   <Sparkles className="w-5 h-5 animate-pulse" />
@@ -416,7 +474,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                       <button
                         type="button"
                         onClick={sendAllToDiscord}
-                        disabled={activeRequestId !== null}
+                        disabled={isBusy}
                         className="flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 px-3 py-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {activeRequestId === 'all' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -429,7 +487,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                 {results.length > 1 && (
                   <ResultActions
                     assets={results.map((result) => ({ url: result.url, name: result.outputName }))}
-                    disabled={isProcessing || isLoadingImages}
+                    disabled={isBusy}
                     label="모든 결과 이어 편집"
                   />
                 )}
@@ -455,7 +513,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                           <button
                             type="button"
                             onClick={() => sendResultToDiscord(result)}
-                            disabled={activeRequestId !== null}
+                            disabled={isBusy}
                             className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 transition disabled:cursor-not-allowed disabled:opacity-50"
                             aria-label={`${result.fileName} Discord로 보내기`}
                             title="Discord로 보내기"
@@ -468,7 +526,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                       </div>
                       <ResultActions
                         assets={[{ url: result.url, name: result.outputName }]}
-                        disabled={isProcessing || isLoadingImages}
+                        disabled={isBusy}
                         label={`${result.outputName} 이어 편집`}
                       />
                     </div>

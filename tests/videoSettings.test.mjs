@@ -46,6 +46,7 @@ test('mixed landscape and portrait files start with independent full-frame setti
   assert.equal(tall.endTime, 2.5);
   assert.notEqual(wide.crop, tall.crop);
   assert.equal(wide.aspectLocked, true);
+  assert.equal(wide.cropPreset, 'free');
   assert.equal(tall.fitMode, 'contain');
 
   const editedWide = changeOutputDimension(wide, 'width', '640');
@@ -97,11 +98,11 @@ test('changing a locked crop retains the manually chosen scale and clamps to tha
 test('sharing output settings preserves every destination crop and time range without mutation', () => {
   const source = freezeSettings({
     ...createVideoSettings(landscape), outputWidth: '640', outputHeight: '360', fitMode: 'cover',
-    crop: { x: 10, y: 20, width: 1600, height: 900 }, startTime: 2, endTime: 5,
+    crop: { x: 10, y: 20, width: 1600, height: 900 }, cropPreset: '9:16', startTime: 2, endTime: 5,
   });
   const destination = freezeSettings({
     ...createVideoSettings(portrait), crop: { x: 30, y: 40, width: 900, height: 1200 },
-    startTime: 0.5, endTime: 2, scale: 0.5,
+    startTime: 0.5, endTime: 2, scale: 0.5, cropPreset: '4:5',
   });
   const sourceBefore = plain(source);
   const destinationBefore = plain(destination);
@@ -112,6 +113,7 @@ test('sharing output settings preserves every destination crop and time range wi
   assert.deepEqual(plain(copied.crop), destinationBefore.crop);
   assert.deepEqual([copied.startTime, copied.endTime], [0.5, 2]);
   assert.equal(copied.scale, 0.5);
+  assert.equal(copied.cropPreset, '4:5');
   assert.notEqual(copied, destination);
   assert.deepEqual(plain(source), sourceBefore);
   assert.deepEqual(plain(destination), destinationBefore);

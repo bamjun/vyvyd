@@ -19,7 +19,7 @@ import { DiscordSendStatus } from './DiscordSendStatus';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { formatBytes } from '@/lib/utils';
 import { getMergeLayout, mergeMedia, validateMergeFile } from '@/lib/mediaMerger';
-import type { MergeDirection, MergeMode, MergeSource } from '@/lib/mediaMerger';
+import type { MergeAlignment, MergeDirection, MergeFit, MergeMode, MergeSource } from '@/lib/mediaMerger';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
@@ -67,6 +67,8 @@ const loadDimensions = (url: string): Promise<{ width: number; height: number }>
 export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebhookUrl }) => {
   const [mode, setMode] = useState<MergeMode>('image');
   const [direction, setDirection] = useState<MergeDirection>('horizontal');
+  const [fit, setFit] = useState<MergeFit>('original');
+  const [alignment, setAlignment] = useState<MergeAlignment>('start');
   const [sources, setSources] = useState<SourceItem[]>([]);
   const [result, setResult] = useState<MergeResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -102,14 +104,14 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
 
   const { layout, layoutError } = useMemo(() => {
     try {
-      return { layout: getMergeLayout(sources, direction), layoutError: '' };
+      return { layout: getMergeLayout(sources, direction, { fit, alignment }), layoutError: '' };
     } catch (error) {
       return {
         layout: null,
         layoutError: error instanceof Error ? error.message : '합친 이미지의 크기가 너무 큽니다. 파일을 줄여 주세요.',
       };
     }
-  }, [sources, direction]);
+  }, [sources, direction, fit, alignment]);
 
   const clearResult = () => {
     if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current);
@@ -268,6 +270,20 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
     setErrorMessage('');
   };
 
+  const changeFit = (nextFit: MergeFit) => {
+    if (nextFit === fit || operationRef.current || busy) return;
+    clearResult();
+    setFit(nextFit);
+    setErrorMessage('');
+  };
+
+  const changeAlignment = (nextAlignment: MergeAlignment) => {
+    if (nextAlignment === alignment || operationRef.current || busy) return;
+    clearResult();
+    setAlignment(nextAlignment);
+    setErrorMessage('');
+  };
+
   const merge = async () => {
     if (sources.length < 2 || !layout || operationRef.current || busy) return;
     const signal = beginTask();
@@ -284,7 +300,7 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
       throwIfAborted(signal);
       const blob = await mergeMedia(sources, mode, direction, (message) => {
         if (isCurrent() && !signal.aborted) setProgressMessage(message);
-      }, signal);
+      }, signal, { fit, alignment });
       throwIfAborted(signal);
       if (!isCurrent()) return;
       const url = URL.createObjectURL(blob);
@@ -451,6 +467,29 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
                   </button>
                 ))}
               </div>
+              <div className="space-y-2">
+                <h4 className="text-xs font-medium text-gray-300">크기 맞춤</h4>
+                <div className="grid grid-cols-2 gap-2" role="group" aria-label="합치기 크기 맞춤">
+                  {([{ value: 'original', label: '원본 크기' }, { value: 'match', label: direction === 'horizontal' ? '같은 높이로 맞춤' : '같은 너비로 맞춤' }] as const).map((option) => (
+                    <button key={option.value} type="button" aria-pressed={fit === option.value} disabled={busy} onClick={() => changeFit(option.value)} className={`rounded-xl border px-3 py-2.5 text-xs transition disabled:opacity-50 ${fit === option.value ? 'border-purple-500 bg-purple-500/15 text-purple-300' : 'border-white/10 bg-white/5 text-gray-400 hover:text-gray-200'}`}>
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] leading-relaxed text-gray-500">맞춤은 가장 작은 {direction === 'horizontal' ? '높이' : '너비'}에 맞춰 비율을 유지하며 축소합니다.</p>
+              </div>
+              {fit === 'original' && (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-medium text-gray-300">정렬</h4>
+                  <div className="grid grid-cols-3 gap-2" role="group" aria-label="합치기 정렬">
+                    {([{ value: 'start', label: direction === 'horizontal' ? '위쪽' : '왼쪽' }, { value: 'center', label: '중앙' }, { value: 'end', label: direction === 'horizontal' ? '아래쪽' : '오른쪽' }] as const).map((option) => (
+                      <button key={option.value} type="button" aria-pressed={alignment === option.value} disabled={busy} onClick={() => changeAlignment(option.value)} className={`rounded-xl border px-3 py-2.5 text-xs transition disabled:opacity-50 ${alignment === option.value ? 'border-purple-500 bg-purple-500/15 text-purple-300' : 'border-white/10 bg-white/5 text-gray-400 hover:text-gray-200'}`}>
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3 text-xs">
                   <span className="text-gray-400">배치 미리보기</span>
@@ -468,7 +507,9 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
                 ) : (
                   <p role="alert" className="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-300">{layoutError}</p>
                 )}
-                <p className="text-xs leading-relaxed text-gray-500">원본 크기를 유지하고 {direction === 'horizontal' ? '위쪽' : '왼쪽'}을 맞춥니다. 크기가 다른 부분은 투명 여백으로 채웁니다.</p>
+                <p className="text-xs leading-relaxed text-gray-500">{fit === 'match'
+                  ? `같은 ${direction === 'horizontal' ? '높이' : '너비'}로 비율을 유지해 이어 붙입니다.`
+                  : `원본 크기를 유지하고 ${alignment === 'center' ? '중앙' : direction === 'horizontal' ? alignment === 'start' ? '위쪽' : '아래쪽' : alignment === 'start' ? '왼쪽' : '오른쪽'}을 맞춥니다. 크기가 다른 부분은 투명 여백으로 채웁니다.`}</p>
                 {mode === 'gif' && <p className="rounded-xl border border-purple-500/15 bg-purple-500/5 p-3 text-xs leading-relaxed text-purple-300">GIF는 함께 재생되며 가장 긴 GIF 길이에 맞춥니다. 먼저 끝난 GIF는 마지막 프레임을 유지합니다. 이 배치 미리보기의 재생 타이밍은 결과와 다를 수 있습니다.</p>}
               </div>
               <button type="button" onClick={() => void merge()} disabled={busy || sources.length < 2 || !layout} className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 px-3 py-4 text-sm font-medium shadow-lg shadow-purple-500/10 transition hover:from-purple-500 hover:to-indigo-500 disabled:cursor-not-allowed disabled:opacity-50">

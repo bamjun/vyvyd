@@ -76,6 +76,8 @@ interface GifMergePosition {
   y: number;
   width: number;
   height: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
 }
 
 export const mergeGifFiles = (
@@ -101,7 +103,9 @@ export const mergeGifFiles = (
       const buffer = await files[index].arrayBuffer();
       throwIfAborted(signal);
       const gif = parseGIF(buffer);
-      if (gif.lsd.width !== positions[index].width || gif.lsd.height !== positions[index].height) {
+      const position = positions[index];
+      if (gif.lsd.width !== (position.sourceWidth ?? position.width)
+        || gif.lsd.height !== (position.sourceHeight ?? position.height)) {
         throw new Error('GIF 크기가 변경되었습니다. 파일을 다시 추가해 주세요.');
       }
 
@@ -124,8 +128,13 @@ export const mergeGifFiles = (
     }
     throwIfAborted(signal);
 
-    const normalizedInputs = files.map((_, index) =>
-      `[${index}:v]setpts=PTS-STARTPTS,format=rgba[input${index}];`).join('');
+    const normalizedInputs = files.map((_, index) => {
+      const position = positions[index];
+      const needsScale = position.width !== (position.sourceWidth ?? position.width)
+        || position.height !== (position.sourceHeight ?? position.height);
+      const scale = needsScale ? `,scale=${position.width}:${position.height}:flags=lanczos,setsar=1` : '';
+      return `[${index}:v]setpts=PTS-STARTPTS,format=rgba${scale}[input${index}];`;
+    }).join('');
     const inputLabels = files.map((_, index) => `[input${index}]`).join('');
     const layout = positions.map(({ x, y }) => `${x}_${y}`).join('|');
     // xstack holds ended inputs on their last frame until every input ends.

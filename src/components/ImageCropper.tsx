@@ -21,17 +21,12 @@ import { ResultActions } from './ResultActions';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
+import { CropPresetControls } from './CropPresetControls';
+import { centerCrop, constrainCrop, CropPreset, CropRect, getPresetAspectRatio, getPresetCrop } from '@/lib/cropPresets';
 
 interface ImageCropperProps {
   onSuccess: (size: number) => void;
   discordWebhookUrl: string;
-}
-
-interface CropRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
 }
 
 interface CropResult {
@@ -124,6 +119,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   const [sourceWidth, setSourceWidth] = useState(0);
   const [sourceHeight, setSourceHeight] = useState(0);
   const [crop, setCrop] = useState<CropRect>(EMPTY_CROP);
+  const [cropPreset, setCropPreset] = useState<CropPreset>('free');
   const [scale, setScale] = useState(1);
   const [result, setResult] = useState<CropResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -172,7 +168,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
       setSourceUrl(nextUrl);
       setSourceWidth(dimensions.width);
       setSourceHeight(dimensions.height);
-      setCrop({ x: 0, y: 0, width: dimensions.width, height: dimensions.height });
+      setCrop(getPresetCrop(dimensions, cropPreset));
       setScale(1);
     } catch (error) {
       URL.revokeObjectURL(nextUrl);
@@ -190,6 +186,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
     if (isProcessing) return;
     clearResult();
     setCancellationMessage('');
+    setCropPreset('free');
     setCrop({ x: 0, y: 0, width: sourceWidth, height: sourceHeight });
   };
 
@@ -197,8 +194,18 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
     if (isProcessing) return;
     clearResult();
     setCancellationMessage('');
-    setCrop(nextCrop);
+    setCrop(constrainCrop(nextCrop, { width: sourceWidth, height: sourceHeight }, getPresetAspectRatio(cropPreset)));
   };
+
+  const selectPreset = (preset: CropPreset) => {
+    if (isProcessing) return;
+    clearResult();
+    setCancellationMessage('');
+    setCropPreset(preset);
+    if (preset !== 'free') setCrop(getPresetCrop({ width: sourceWidth, height: sourceHeight }, preset));
+  };
+
+  const moveCropToCenter = () => updateCrop(centerCrop(crop, { width: sourceWidth, height: sourceHeight }));
 
   const clearSource = () => {
     if (isProcessing) return;
@@ -372,6 +379,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
               crop={crop}
               setCrop={updateCrop}
               mediaRef={imageRef}
+              aspectRatio={getPresetAspectRatio(cropPreset)}
             />
           )}
         </div>
@@ -387,6 +395,13 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
             <Crop className="h-5 w-5 text-purple-400" />
             자르기 설정
           </h3>
+
+          <CropPresetControls
+            preset={cropPreset}
+            onPresetChange={selectPreset}
+            onCenter={moveCropToCenter}
+            disabled={isProcessing}
+          />
 
           <div>
             <div className="mb-1 flex justify-between">
