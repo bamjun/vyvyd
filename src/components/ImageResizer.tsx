@@ -20,6 +20,8 @@ import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
 import { useMediaReceiver } from '@/hooks/useMediaTransfer';
 import { ResultActions } from './ResultActions';
+import { TargetSizeControl } from './TargetSizeControl';
+import { optimizeToTargetSize, parseTargetSize, type TargetEncodingSettings } from '@/lib/targetSize';
 
 interface ImageResizerProps {
   onSuccess: (size: number) => void;
@@ -46,6 +48,13 @@ interface ResizeResult {
   originalSize: number;
   width: number;
   height: number;
+  optimization?: {
+    targetBytes: number;
+    metTarget: boolean;
+    attempts: number;
+    quality?: number;
+    colors?: number;
+  };
 }
 
 const SUPPORTED_INPUT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -113,6 +122,9 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const [maxHeight, setMaxHeight] = useState(1920);
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('original');
   const [quality, setQuality] = useState(85);
+  const [targetSizeEnabled, setTargetSizeEnabled] = useState(false);
+  const [targetSizeValue, setTargetSizeValue] = useState('1');
+  const [targetSizeUnit, setTargetSizeUnit] = useState<'KB' | 'MB'>('MB');
   const [isDragging, setIsDragging] = useState(false);
   const [isLoadingImages, setIsLoadingImages] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -257,6 +269,12 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
       return;
     }
 
+    const targetBytes = targetSizeEnabled ? parseTargetSize(targetSizeValue, targetSizeUnit) : null;
+    if (targetSizeEnabled && targetBytes === null) {
+      setErrorMessage('목표 용량은 1 KB 이상 100 MB 이하로 입력해 주세요.');
+      return;
+    }
+
     const signal = beginTask();
     if (!signal) return;
     busyRef.current = true;
@@ -280,34 +298,69 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
         setProgressIndex(index + 1);
         setProgressMessage(`${item.file.name} 처리 중...`);
 
-        let blob: Blob;
-        if (preserveAnimatedGif) {
-          [blob] = await processGifFilters(
-            item.file,
-            [`scale=${target.width}:${target.height}:flags=lanczos`],
-            setProgressMessage,
-            signal,
-          );
-        } else {
-          const image = await loadImage(item.src);
+        const image = preserveAnimatedGif ? null : await loadImage(item.src);
+        throwIfAborted(signal);
+        const encode = async (settings: TargetEncodingSettings, attempt: number): Promise<Blob> => {
           throwIfAborted(signal);
-          canvas.width = target.width;
-          canvas.height = target.height;
-          context.clearRect(0, 0, target.width, target.height);
+          const attemptLabel = targetSizeEnabled ? `${item.file.name} · 자동 최적화 ${attempt}회차` : `${item.file.name} 처리 중...`;
+          setProgressMessage(attemptLabel);
+
+          if (preserveAnimatedGif) {
+            const [gifBlob] = await processGifFilters(
+              item.file,
+              [`scale=${settings.width}:${settings.height}:flags=lanczos`],
+              (message) => setProgressMessage(`${attemptLabel} · ${message}`),
+              signal,
+              settings.colors === undefined ? undefined : { colors: settings.colors },
+            );
+            return gifBlob;
+          }
+
+          if (!image) throw new Error('이미지를 읽을 수 없습니다.');
+          canvas.width = settings.width;
+          canvas.height = settings.height;
+          context.clearRect(0, 0, settings.width, settings.height);
           context.imageSmoothingEnabled = true;
           context.imageSmoothingQuality = 'high';
 
           if (outputType === 'image/jpeg') {
             context.fillStyle = '#ffffff';
-            context.fillRect(0, 0, target.width, target.height);
+            context.fillRect(0, 0, settings.width, settings.height);
           }
 
-          context.drawImage(image, 0, 0, target.width, target.height);
-          blob = await canvasToBlob(
-            canvas,
-            outputType,
-            outputType === 'image/png' ? undefined : quality / 100,
-          );
+          context.drawImage(image, 0, 0, settings.width, settings.height);
+          const encoded = await canvasToBlob(canvas, outputType, settings.quality);
+          if (targetSizeEnabled && encoded.type !== outputType) {
+            throw new Error('선택한 이미지 저장 형식을 이 브라우저에서 지원하지 않습니다.');
+          }
+          return encoded;
+        };
+
+        let blob: Blob;
+        let resultSettings: TargetEncodingSettings = {
+          ...target,
+          quality: outputType === 'image/jpeg' || outputType === 'image/webp' ? quality / 100 : undefined,
+        };
+        let optimization: ResizeResult['optimization'];
+        if (targetBytes !== null) {
+          const optimized = await optimizeToTargetSize({
+            targetBytes,
+            initial: { ...resultSettings, colors: preserveAnimatedGif ? 256 : undefined },
+            signal,
+            onProgress: (message) => setProgressMessage(`${item.file.name} · ${message}`),
+            encode,
+          });
+          blob = optimized.blob;
+          resultSettings = optimized.settings;
+          optimization = {
+            targetBytes: optimized.targetBytes,
+            metTarget: optimized.metTarget,
+            attempts: optimized.attempts,
+            quality: optimized.settings.quality,
+            colors: optimized.settings.colors,
+          };
+        } else {
+          blob = await encode(resultSettings, 1);
         }
         throwIfAborted(signal);
         const url = URL.createObjectURL(blob);
@@ -316,12 +369,13 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
         const result: ResizeResult = {
           id: item.id,
           originalName: item.file.name,
-          downloadName: getDownloadName(item.file.name, target.width, target.height, outputType),
+          downloadName: getDownloadName(item.file.name, resultSettings.width, resultSettings.height, outputType),
           url,
           size: blob.size,
           originalSize: item.file.size,
-          width: target.width,
-          height: target.height,
+          width: resultSettings.width,
+          height: resultSettings.height,
+          optimization,
         };
 
         nextResults.push(result);
@@ -424,7 +478,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
           </label>
           <p className="text-[11px] text-gray-500 mt-3">또는 여기에 드래그 · JPG, PNG, WebP, GIF</p>
           {isLoadingImages && <p className="text-xs text-purple-300 mt-4">이미지 불러오는 중...</p>}
-          {errorMessage && <p className="text-xs text-red-300 mt-4">{errorMessage}</p>}
+          {errorMessage && <p role="alert" className="text-xs text-red-300 mt-4">{errorMessage}</p>}
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
@@ -457,7 +511,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                       </div>
                       <p className="text-xs text-gray-300 truncate" title={item.file.name}>{item.file.name}</p>
                       <p className="text-[10px] text-gray-500">원본 {item.width} × {item.height}px</p>
-                      <p className="text-[10px] text-purple-300">결과 {target.width} × {target.height}px</p>
+                      <p className="text-[10px] text-purple-300">{targetSizeEnabled ? '자동 조절 상한' : '결과'} {target.width} × {target.height}px</p>
                     </div>
                   );
                 })}
@@ -591,7 +645,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                 {isLossyOutput && (
                   <div>
                     <div className="flex justify-between mb-2">
-                      <label className="text-xs font-semibold uppercase text-gray-400">화질</label>
+                      <label className="text-xs font-semibold uppercase text-gray-400">{targetSizeEnabled ? '화질 상한' : '화질'}</label>
                       <span className="text-xs font-mono text-purple-400">{quality}%</span>
                     </div>
                     <input
@@ -606,6 +660,18 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                     />
                   </div>
                 )}
+
+                <TargetSizeControl
+                  id="resize-target-size"
+                  enabled={targetSizeEnabled}
+                  value={targetSizeValue}
+                  unit={targetSizeUnit}
+                  disabled={isBusy}
+                  onEnabledChange={(enabled) => updateSetting(() => setTargetSizeEnabled(enabled))}
+                  onValueChange={(value) => updateSetting(() => setTargetSizeValue(value))}
+                  onUnitChange={(unit) => updateSetting(() => setTargetSizeUnit(unit))}
+                  description="파일마다 목표를 적용합니다. PNG는 크기, JPG/WebP는 화질과 크기, GIF는 색상 수와 크기를 자동 조절합니다. GIF 애니메이션과 재생 속도는 유지됩니다."
+                />
 
                 <div className="rounded-xl bg-green-500/5 border border-green-500/15 p-4">
                   <p className="text-xs text-green-300 leading-relaxed">
@@ -626,11 +692,11 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
               ) : (
                 <button
                   onClick={createResizedImages}
-                  disabled={isBusy}
+                  disabled={isBusy || (targetSizeEnabled && parseTargetSize(targetSizeValue, targetSizeUnit) === null)}
                   className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 transition duration-300 flex items-center justify-center space-x-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Sparkles className="w-5 h-5 animate-pulse" />
-                  <span>{imageItems.length}개 이미지 크기 줄이기</span>
+                  <span>{imageItems.length}개 이미지 {targetSizeEnabled ? '목표 용량 맞추기' : '크기 줄이기'}</span>
                 </button>
               )}
               {cancellationMessage && <p role="status" className="text-xs text-gray-400">{cancellationMessage}</p>}
@@ -691,6 +757,14 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                         <p className="text-[10px] text-gray-500">
                           {result.width} × {result.height}px · {formatBytes(result.originalSize)} → {formatBytes(result.size)}
                         </p>
+                        {result.optimization && (
+                          <p role="status" className={`text-[10px] mt-1 ${result.optimization.metTarget ? 'text-green-300' : 'text-amber-300'}`}>
+                            목표 {formatBytes(result.optimization.targetBytes)} {result.optimization.metTarget ? '이하 달성' : '초과'} · {result.optimization.attempts}회 변환
+                            {result.optimization.quality !== undefined && ` · 화질 ${Math.round(result.optimization.quality * 100)}%`}
+                            {result.optimization.colors !== undefined && ` · ${result.optimization.colors}색`}
+                            {!result.optimization.metTarget && ' · 조절 범위에서 목표를 맞추지 못했습니다. 가장 작은 결과를 다운로드할 수 있습니다.'}
+                          </p>
+                        )}
                       </div>
                       <div className="flex shrink-0 gap-2">
                         <a
@@ -728,7 +802,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                 </div>
               </div>
             )}
-            {errorMessage && <p className="text-xs text-red-300">{errorMessage}</p>}
+            {errorMessage && <p role="alert" className="text-xs text-red-300">{errorMessage}</p>}
           </div>
         </div>
       )}

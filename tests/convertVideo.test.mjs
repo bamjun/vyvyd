@@ -35,6 +35,7 @@ const stages = ['fetch', 'write', 'palette', 'render', 'result'];
 const harness = ({ rejectAt, nonzeroAt, cancelAt, result = gifBytes, deleteFails = false } = {}) => {
   const controller = new AbortController();
   const calls = [];
+  const commands = [];
   const deleted = [];
   const queueRequests = [];
   const progress = [];
@@ -52,6 +53,7 @@ const harness = ({ rejectAt, nonzeroAt, cancelAt, result = gifBytes, deleteFails
     loaded: true,
     writeFile: async () => { step('write'); },
     exec: async (args) => {
+      commands.push(args);
       const stage = args.includes('-vf') ? 'palette' : 'render';
       step(stage);
       return nonzeroAt === stage ? 1 : 0;
@@ -84,7 +86,7 @@ const harness = ({ rejectAt, nonzeroAt, cancelAt, result = gifBytes, deleteFails
   const options = { fps: 12, dither: 'bayer', signal: controller.signal, onProgress };
 
   return {
-    controller, calls, deleted, queueRequests, progress, input, options,
+    controller, calls, commands, deleted, queueRequests, progress, input, options,
     convert: () => api.convertVideoToGif(input, options),
   };
 };
@@ -178,3 +180,25 @@ test('cleanup failures do not discard a successfully converted Blob', async () =
   assert.equal((await subject.convert()).size, gifBytes.byteLength);
   assertCleaned(subject);
 });
+
+test('manual palette remains unchanged and automatic color limits reach the encoder', async () => {
+  const manual = harness();
+  await manual.convert();
+  assert.match(manual.commands[0].join(' '), /palettegen=stats_mode=diff:reserve_transparent=1/);
+  assert.doesNotMatch(manual.commands[0].join(' '), /max_colors/);
+  const automatic = harness();
+  automatic.options.colors = 64;
+  await automatic.convert();
+  assert.match(automatic.commands[0].join(' '), /max_colors=64/);
+  assertCleaned(automatic);
+});
+
+for (const colors of [0, 31, 257, 32.5, NaN, Infinity]) {
+  test(`invalid palette color count ${colors} prevents queue and encoder access`, async () => {
+    const subject = harness();
+    subject.options.colors = colors;
+    await assert.rejects(subject.convert(), /색상/);
+    assert.equal(subject.queueRequests.length, 0);
+    assert.deepEqual(subject.calls, []);
+  });
+}

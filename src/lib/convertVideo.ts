@@ -17,6 +17,7 @@ export interface VideoConversionInput {
 interface VideoConversionOptions {
   fps: number;
   dither: string;
+  colors?: number;
   signal: AbortSignal;
   onProgress?: (message: string) => void;
 }
@@ -34,7 +35,7 @@ const safeDelete = async (ffmpeg: FFmpeg, fileName: string, signal: AbortSignal)
 /** Converts one file in the shared queue; callers own batch status and result URLs. */
 export async function convertVideoToGif(
   input: VideoConversionInput,
-  { fps, dither, signal, onProgress }: VideoConversionOptions,
+  { fps, dither, colors, signal, onProgress }: VideoConversionOptions,
 ): Promise<Blob> {
   throwIfAborted(signal);
   if (!hasValidVideoSettings(input.settings)) {
@@ -45,6 +46,9 @@ export async function convertVideoToGif(
   }
   if (!['none', 'bayer', 'floyd_steinberg'].includes(dither)) {
     throw new Error('디더링 방식을 확인해 주세요.');
+  }
+  if (colors !== undefined && (!Number.isInteger(colors) || colors < 32 || colors > 256)) {
+    throw new Error('GIF 색상 수는 32에서 256 사이의 정수로 설정해 주세요.');
   }
 
   const { settings } = input;
@@ -79,7 +83,7 @@ export async function convertVideoToGif(
         '-ss', effectiveStart.toString(),
         '-t', duration.toString(),
         '-i', inputName,
-        '-vf', `${filter},palettegen=stats_mode=diff:reserve_transparent=1`,
+        '-vf', `${filter},palettegen=stats_mode=diff:reserve_transparent=1${colors === undefined ? '' : `:max_colors=${colors}`}`,
         paletteName,
       ]);
       throwIfAborted(signal);

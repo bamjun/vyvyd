@@ -15,9 +15,9 @@ const safeDelete = async (ffmpeg: FFmpeg, fileName: string) => {
   }
 };
 
-const getPaletteFilter = (filter: string) =>
+const getPaletteFilter = (filter: string, colors?: number) =>
   `[0:v]${filter},split[processed][palette_source];`
-  + '[palette_source]palettegen=reserve_transparent=1[palette];'
+  + `[palette_source]palettegen=reserve_transparent=1${colors === undefined ? '' : `:max_colors=${colors}`}[palette];`
   + '[processed][palette]paletteuse=dither=bayer:bayer_scale=3:alpha_threshold=128';
 
 export const processGifFilters = (
@@ -25,7 +25,11 @@ export const processGifFilters = (
   filters: string[],
   onProgress?: (message: string) => void,
   signal?: AbortSignal,
+  options: { colors?: number } = {},
 ) => runFFmpegJob(async (ffmpeg) => {
+  if (options.colors !== undefined && (!Number.isInteger(options.colors) || options.colors < 32 || options.colors > 256)) {
+    throw new Error('GIF 색상 수를 32~256 사이의 정수로 설정해 주세요.');
+  }
   const jobId = `${Date.now()}-${jobSequence}`;
   jobSequence += 1;
   const inputName = `gif-input-${jobId}.gif`;
@@ -47,7 +51,7 @@ export const processGifFilters = (
       const exitCode = await ffmpeg.exec([
         '-y',
         '-i', inputName,
-        '-filter_complex', getPaletteFilter(filters[index]),
+        '-filter_complex', getPaletteFilter(filters[index], options.colors),
         '-loop', '0',
         outputName,
       ]);

@@ -14,6 +14,8 @@ import { CancelProcessingButton } from './CancelProcessingButton';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
 import { VideoOutputSettings } from './VideoOutputSettings';
 import { VideoOutputPreview } from './VideoOutputPreview';
+import { TargetSizeControl } from './TargetSizeControl';
+import { optimizeToTargetSize, parseTargetSize } from '@/lib/targetSize';
 import type { VideoCrop } from '@/lib/videoGeometry';
 import {
   applyVideoOutputSettings, changeOutputDimension, changeVideoCrop, createVideoSettings,
@@ -44,6 +46,20 @@ interface GifResult {
   size: number;
   width: number;
   height: number;
+  optimization?: {
+    targetBytes: number;
+    metTarget: boolean;
+    attempts: number;
+    fps: number;
+    colors: number;
+  };
+}
+
+interface ConvertedVideo {
+  blob: Blob;
+  width: number;
+  height: number;
+  optimization?: GifResult['optimization'];
 }
 
 const EMPTY_SETTINGS = createVideoSettings({ width: 1, height: 1, duration: 1 });
@@ -71,6 +87,9 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const [settingsNotice, setSettingsNotice] = useState('');
   const [fps, setFps] = useState<number>(12);
   const [dither, setDither] = useState<string>('bayer');
+  const [targetEnabled, setTargetEnabled] = useState(false);
+  const [targetValue, setTargetValue] = useState('1');
+  const [targetUnit, setTargetUnit] = useState<'KB' | 'MB'>('MB');
   const [isLoadingVideos, setIsLoadingVideos] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [progressMsg, setProgressMsg] = useState<string>('');
@@ -89,6 +108,8 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const selectedVideo = videoItems.find((item) => item.id === selectedVideoId) ?? videoItems[0];
   const settings = selectedVideo?.settings ?? EMPTY_SETTINGS;
   const { crop, startTime, endTime, outputWidth, outputHeight, scale, aspectLocked, fitMode } = settings;
+  const targetBytes = parseTargetSize(targetValue, targetUnit);
+  const invalidSizeTarget = targetEnabled && targetBytes === null;
 
   useEffect(() => {
     if (!isActive) videoRef.current?.pause();
@@ -201,6 +222,12 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const convertToGif = async (targets: VideoItem[], preserveResults = false) => {
     if (targets.length === 0 || isProcessing) return;
 
+    if (invalidSizeTarget) {
+      setErrorMessage('목표 용량을 1 KB에서 100 MB 사이로 입력해 주세요.');
+      return;
+    }
+    const optimizationTargetBytes = targetEnabled ? targetBytes : null;
+
     const invalidTarget = targets.find((item) => !hasValidVideoSettings(item.settings));
     if (invalidTarget) {
       setSelectedVideoId(invalidTarget.id);
@@ -235,20 +262,60 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
           setProgressIndex(index + 1);
           setFileStates((previous) => ({ ...previous, [item.id]: { status: 'processing' } }));
         },
-        convert: (item, index) => convertVideoToGif(item, {
-          fps, dither, signal,
-          onProgress: (message) => {
+        convert: async (item, index): Promise<ConvertedVideo> => {
+          const reportProgress = (message: string) => {
             if (!signal.aborted) setProgressMsg(`${index + 1}/${targets.length} · ${item.file.name}: ${message}`);
-          },
-        }),
+          };
+          if (optimizationTargetBytes === null) {
+            const blob = await convertVideoToGif(item, { fps, dither, signal, onProgress: reportProgress });
+            return { blob, width: Number(item.settings.outputWidth), height: Number(item.settings.outputHeight) };
+          }
+          const optimized = await optimizeToTargetSize({
+            targetBytes: optimizationTargetBytes,
+            initial: {
+              width: Number(item.settings.outputWidth),
+              height: Number(item.settings.outputHeight),
+              fps,
+              colors: 256,
+            },
+            signal,
+            onProgress: reportProgress,
+            encode: (nextSettings, attempt) => convertVideoToGif({
+              ...item,
+              settings: {
+                ...item.settings,
+                outputWidth: String(nextSettings.width),
+                outputHeight: String(nextSettings.height),
+              },
+            }, {
+              fps: nextSettings.fps ?? fps,
+              colors: nextSettings.colors,
+              dither,
+              signal,
+              onProgress: (message) => reportProgress(`자동 조절 ${attempt}회 · ${message}`),
+            }),
+          });
+          return {
+            blob: optimized.blob,
+            width: optimized.settings.width,
+            height: optimized.settings.height,
+            optimization: {
+              targetBytes: optimized.targetBytes,
+              metTarget: optimized.metTarget,
+              attempts: optimized.attempts,
+              fps: optimized.settings.fps ?? fps,
+              colors: optimized.settings.colors ?? 256,
+            },
+          };
+        },
         onOutcome: (item, outcome) => {
           if (outcome.status === 'succeeded') {
-            const blob = outcome.result;
+            const { blob, width, height, optimization } = outcome.result;
             const url = URL.createObjectURL(blob);
             resultUrlsRef.current.add(url);
             const result: GifResult = {
               id: item.id, fileName: item.file.name, url, size: blob.size,
-              width: Number(item.settings.outputWidth), height: Number(item.settings.outputHeight),
+              width, height, optimization,
             };
             setResults((previous) => [...previous.filter((entry) => entry.id !== item.id), result]
               .sort((left, right) => videoItems.findIndex((video) => video.id === left.id) - videoItems.findIndex((video) => video.id === right.id)));
@@ -564,6 +631,17 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                     <option value="none">None (Sharp)</option>
                   </select>
                 </div>
+                <TargetSizeControl
+                  id="video-target-size"
+                  enabled={targetEnabled}
+                  value={targetValue}
+                  unit={targetUnit}
+                  disabled={isProcessing}
+                  onEnabledChange={setTargetEnabled}
+                  onValueChange={setTargetValue}
+                  onUnitChange={setTargetUnit}
+                  description="파일마다 목표 용량 이하가 되도록 색상 수·FPS·출력 크기를 자동 조절합니다. 자르기 영역·변환 구간·맞춤 방식은 유지됩니다."
+                />
               </fieldset>
 
               {invalidVideo && <p role="alert" className="text-xs text-amber-300">{invalidVideo.file.name}: 출력 크기는 1 이상의 정수로, 종료 시간은 시작 시간보다 크게 설정해 주세요.</p>}
@@ -580,7 +658,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
               ) : (
                 <button
                   onClick={() => void convertToGif(videoItems)}
-                  disabled={Boolean(invalidVideo)}
+                  disabled={Boolean(invalidVideo) || invalidSizeTarget}
                   className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition duration-300 flex items-center justify-center space-x-2"
                 >
                   <Sparkles className="w-5 h-5 animate-pulse" />
@@ -593,7 +671,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
               <section aria-label="변환 실패 파일" className="glass-panel rounded-2xl border border-red-500/20 p-5 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h3 className="text-sm font-semibold text-red-300">실패 {failedEntries.length}개</h3>
-                  <button type="button" onClick={() => void convertToGif(failedEntries.map(({ item }) => item), true)} disabled={isProcessing} className="rounded-lg bg-purple-600 px-3 py-2 text-xs font-medium hover:bg-purple-500 disabled:opacity-50">실패 {failedEntries.length}개만 다시 시도</button>
+                  <button type="button" onClick={() => void convertToGif(failedEntries.map(({ item }) => item), true)} disabled={isProcessing || invalidSizeTarget} className="rounded-lg bg-purple-600 px-3 py-2 text-xs font-medium hover:bg-purple-500 disabled:opacity-50">실패 {failedEntries.length}개만 다시 시도</button>
                 </div>
                 <p className="text-xs text-gray-400">완료된 GIF는 유지됩니다. 설정을 수정한 뒤 다시 시도할 수 있습니다.</p>
                 <ul className="space-y-3">
@@ -603,7 +681,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                       <p className="text-xs text-red-300">{message}</p>
                       <div className="flex flex-wrap gap-2">
                         <button type="button" aria-label={`${item.file.name} 설정 수정`} onClick={() => { videoRef.current?.pause(); setSelectedVideoId(item.id); }} disabled={isProcessing} className="rounded-lg border border-white/10 px-3 py-2 text-xs text-gray-300 hover:bg-white/5 disabled:opacity-50">설정 수정</button>
-                        <button type="button" aria-label={`${item.file.name} 다시 시도`} onClick={() => void convertToGif([item], true)} disabled={isProcessing} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">다시 시도</button>
+                        <button type="button" aria-label={`${item.file.name} 다시 시도`} onClick={() => void convertToGif([item], true)} disabled={isProcessing || invalidSizeTarget} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">다시 시도</button>
                       </div>
                     </li>
                   ))}
@@ -613,7 +691,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
             {cancelledItems.length > 0 && !isProcessing && (
               <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-3">
                 <p className="text-xs text-gray-400">아직 완료하지 못한 파일이 {cancelledItems.length}개 있습니다.</p>
-                <button type="button" onClick={() => void convertToGif(cancelledItems, true)} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10">남은 {cancelledItems.length}개 이어서 변환</button>
+                <button type="button" onClick={() => void convertToGif(cancelledItems, true)} disabled={invalidSizeTarget} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">남은 {cancelledItems.length}개 이어서 변환</button>
               </div>
             )}
 
@@ -687,6 +765,14 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                           </button>
                         </div>
                       </div>
+                      {result.optimization && (
+                        <div role="status" className={`space-y-1 text-xs ${result.optimization.metTarget ? 'text-green-300' : 'text-amber-300'}`}>
+                          <p>{result.optimization.metTarget
+                            ? `목표 ${formatBytes(result.optimization.targetBytes)} 이하 달성`
+                            : `목표 ${formatBytes(result.optimization.targetBytes)} 초과 · 자동 조절 범위에서 목표를 맞추지 못했습니다.`}</p>
+                          <p className="text-[10px] text-gray-400">자동 조절: {result.width} × {result.height}px · {result.optimization.fps} FPS · {result.optimization.colors}색 · {result.optimization.attempts}회 시도</p>
+                        </div>
+                      )}
                       <ResultActions
                         assets={[{ url: result.url, name: getGifFileName(result.fileName) }]}
                         disabled={isProcessing || isLoadingVideos}
