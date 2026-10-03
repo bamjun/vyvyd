@@ -32,3 +32,10 @@ Thumbs.db
 .wrangler/
 .dev.vars
 .prod.vars
+
+# Local studio proof downloads and generated renders
+.cache/
+artifacts/
+public/studio-compiler/
+.local/studio/
+.codex/config.toml

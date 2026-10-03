@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { VideoToGif } from './components/VideoToGif';
 import { ImageEditor } from './components/ImageEditor';
 import { DiscordWebhookField } from './components/DiscordWebhookField';
@@ -8,8 +8,15 @@ import { MediaTransferProvider } from './hooks/useMediaTransfer';
 import type { EditorMode } from './components/ImageEditor';
 import { Film, Images, Link2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
+const StudioProofPanel = lazy(() => import('./features/studio/StudioProofPanel'));
+const StudioPanel = lazy(() => import('./features/studio/StudioPanel'));
+
 function App() {
-  const [activeTab, setActiveTab] = useState<'video' | 'editor' | 'formatter'>('editor');
+  const showProof = import.meta.env.DEV && new URLSearchParams(window.location.search).has('studioProof');
+  const [activeTab, setActiveTab] = useState<'video' | 'editor' | 'formatter' | 'studio'>(
+    () => new URLSearchParams(window.location.search).has('studio') || showProof ? 'studio' : 'editor',
+  );
+  const [studioVisited, setStudioVisited] = useState(activeTab === 'studio');
   const [editorMode, setEditorMode] = useState<EditorMode>('resize');
   const discordWebhookFromUrl = getDiscordWebhookFromSearch(window.location.search);
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(
@@ -45,7 +52,7 @@ function App() {
               <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-purple-400 to-indigo-300 bg-clip-text text-transparent">
                 vyvyd
               </h1>
-              <p className="text-[10px] text-gray-400 font-medium">BROWSER-ONLY MULTIMEDIA TOOL</p>
+              <p className="text-[10px] text-gray-400 font-medium">LOCAL MULTIMEDIA WORKSPACE</p>
             </div>
           </div>
 
@@ -69,16 +76,16 @@ function App() {
         {/* Visual Hero Tagline */}
         <div className="text-center max-w-2xl mx-auto space-y-4">
           <h2 className="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-b from-white to-gray-400 bg-clip-text text-transparent">
-            Convert, Resize, Crop & Merge
+            {activeTab === 'studio' ? '포스터 메이커' : 'Convert, Resize, Crop & Merge'}
           </h2>
           <p className="text-gray-400 text-sm md:text-base">
-            Processing happens 100% on your device. Results are uploaded only when you choose to send them to Discord.
+            {activeTab === 'studio' ? '포스터와 홍보지를 위한 작업 공간. 프로젝트와 이미지를 이 컴퓨터에 저장하세요.' : 'Processing happens 100% on your device. Results are uploaded only when you choose to send them to Discord.'}
           </p>
         </div>
 
         {/* Tab Selection */}
         <div className="flex justify-center">
-          <div className="grid w-full max-w-3xl grid-cols-1 gap-2 rounded-2xl border border-white/5 bg-[#121318] p-1.5 shadow-inner sm:grid-cols-3">
+          <div className="grid w-full max-w-3xl grid-cols-1 gap-2 rounded-2xl border border-white/5 bg-[#121318] p-1.5 shadow-inner sm:grid-cols-4">
             <button
               onClick={() => setActiveTab('video')}
               aria-pressed={activeTab === 'video'}
@@ -118,10 +125,15 @@ function App() {
               <Link2 className="w-4 h-4" />
               <span>Discord URL</span>
             </button>
+            <button
+              onClick={() => {setStudioVisited(true); setActiveTab('studio');}}
+              aria-pressed={activeTab === 'studio'} aria-controls="studio-panel"
+              className={`flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-medium transition duration-200 ${activeTab === 'studio' ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'}`}
+            ><Sparkles className="w-4 h-4" /><span>포스터 메이커</span></button>
           </div>
         </div>
 
-        {activeTab !== 'formatter' && (
+        {(activeTab === 'video' || activeTab === 'editor') && (
           <DiscordWebhookField
             value={discordWebhookUrl}
             onChange={setDiscordWebhookUrl}
@@ -145,6 +157,9 @@ function App() {
           <div id="editor-panel" hidden={activeTab !== 'editor'} className="scroll-mt-24">
             <ImageEditor onSuccess={handleConversionSuccess} discordWebhookUrl={discordWebhookUrl} mode={editorMode} onModeChange={setEditorMode} />
           </div>
+          {studioVisited && <div id="studio-panel" hidden={activeTab !== 'studio'}>
+            <Suspense fallback={<p className="text-gray-400">포스터 메이커를 불러오는 중…</p>}>{showProof ? <StudioProofPanel isActive={activeTab === 'studio'} /> : <StudioPanel isActive={activeTab === 'studio'} />}</Suspense>
+          </div>}
         </div>
 
         {/* Privacy Note Cards */}
