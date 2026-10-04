@@ -7,6 +7,10 @@ import StudioLayersPanel from './StudioLayersPanel';
 import StudioHistoryPanel from './StudioHistoryPanel';
 import {useStudioEditor} from './useStudioEditor';
 import type {Fields} from './studioEditorSettings';
+import {useRef} from 'react';
+import {useMediaTransfer} from '@/hooks/useMediaTransfer';
+import StudioExportPanel from './StudioExportPanel';
+import StudioBundleDownload from './StudioBundleDownload';
 
 const inputClass = 'mt-1 w-full rounded-lg border border-white/10 bg-[#121318] px-3 py-2 text-sm text-white focus:border-purple-400 focus:outline-none';
 const buttonClass = 'inline-flex items-center justify-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm text-gray-200 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40';
@@ -26,6 +30,8 @@ function SettingsFields({fields, onChange, disabled, creating = false}: {fields:
 }
 
 export default function StudioPanel({isActive}: {isActive: boolean}) {
+  const bundleInput = useRef<HTMLInputElement>(null);
+  const {controller: mediaTransfer} = useMediaTransfer();
   const {
     projects, project, fields, setFields, newFields, setNewFields, creating, setCreating, connected, busy,
     status, error, selectedAsset, setSelectedAsset, frame, runtimeStatus, remoteProject, sourcePreview,
@@ -35,7 +41,7 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
     assetInput, connect, openProject, reopenProject, createProject, startCreating, save, addAssets, compile,
     copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer,
     adoptRemote, undo, redo, canUndo, canRedo, beginInteraction, endInteraction, registerCancel, keyboardShortcut,
-    refreshHistory, selectVersion, restoreVersion, restoreRecovery, hasDraft,
+    refreshHistory, selectVersion, restoreVersion, restoreRecovery, hasDraft, importProject,
   } = useStudioEditor(isActive);
   const previewDocument = project;
   const fieldTarget = (target: EventTarget) => target instanceof HTMLElement && Boolean(target.closest('input,textarea,select'));
@@ -50,13 +56,15 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
       <button className={buttonClass} disabled={busy} onClick={() => void connect(!project)}><RefreshCw size={14} className={busy ? 'animate-spin' : ''} />{connected ? '연결 확인' : '다시 연결'}</button>
     </div>
     <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400" role="status"><span className={`inline-flex items-center gap-2 ${connected ? 'text-green-300' : 'text-amber-200'}`}><span className={`h-2 w-2 rounded-full ${connected ? 'bg-green-400' : 'bg-amber-400'}`} />{connected ? '로컬 서비스 연결됨' : '로컬 서비스 연결 필요'}</span><span>{busy ? '처리 중…' : status}</span></div>
-    {!connected && <div className="rounded-xl border border-purple-400/20 bg-purple-500/5 p-4 text-sm text-gray-300"><p>이 컴퓨터에서 프로젝트 저장 서비스를 실행하세요.</p><code className="mt-2 block select-all rounded-lg bg-black/25 p-3 text-xs text-purple-200">npm run studio:server</code><p className="mt-2 text-xs text-gray-400">현재 입력은 이 탭에 보관됩니다. 로컬 편집은 계속할 수 있고, 저장·파일 추가·버전 복원은 다시 연결한 뒤 사용할 수 있습니다.</p></div>}
+    {!connected && <div className="rounded-xl border border-purple-400/20 bg-purple-500/5 p-4 text-sm text-gray-300"><p>이 컴퓨터에서 프로젝트 저장 서비스를 실행하세요.</p><code className="mt-2 block select-all rounded-lg bg-black/25 p-3 text-xs text-purple-200">npm run studio:server</code>{window.location.protocol === 'https:' && <p className="mt-3 text-xs leading-relaxed text-gray-300">이 사이트의 로컬 네트워크 접근 권한을 확인한 뒤 다시 연결하세요. 미리보기 배포 주소는 서비스의 STUDIO_ALLOWED_ORIGIN에 정확히 등록해야 합니다. 내장 브라우저에서 연결 권한을 확인할 수 없으면 <a href="http://127.0.0.1:5173/?studio=1" target="_blank" rel="noopener noreferrer" className="text-purple-300 underline">로컬 포스터 메이커</a>를 사용하세요.</p>}<p className="mt-2 text-xs text-gray-400">현재 입력은 이 탭에 보관됩니다. 로컬 편집은 계속할 수 있고, 저장·파일 추가·버전 복원은 다시 연결한 뒤 사용할 수 있습니다.</p></div>}
     {error && <p role="alert" className="whitespace-pre-line rounded-xl border border-amber-400/20 bg-amber-400/5 p-3 text-sm text-amber-200">{error}</p>}
     {draftNotice && <p role="status" className="rounded-lg border border-amber-400/20 p-3 text-xs text-amber-200">{draftNotice}</p>}
     <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
       <aside className="space-y-4 rounded-xl border border-white/10 bg-black/15 p-4" aria-label="저장된 프로젝트">
         <div className="flex items-center gap-2 text-sm font-semibold text-white"><FolderOpen size={16} />내 프로젝트</div>
         <button className={`${primaryClass} w-full`} disabled={!connected || busy} onClick={startCreating}><Plus size={15} />새 프로젝트</button>
+        <button className={`${buttonClass} w-full`} disabled={!connected || busy} onClick={() => bundleInput.current?.click()}><FolderOpen size={15} />프로젝트 파일 가져오기</button>
+        <input ref={bundleInput} type="file" accept=".vyvyd.json,.json,application/json" aria-label="가져올 프로젝트 파일" className="sr-only" onChange={(event) => {const file = event.target.files?.[0]; event.target.value = ''; if (file) void importProject(file);}} />
         {projects.length === 0 && <p className="text-xs leading-relaxed text-gray-500">아직 프로젝트가 없습니다. 새 프로젝트로 시작하세요.</p>}
         <div className="max-h-96 space-y-2 overflow-auto">{projects.map((entry) => <button key={entry.id} className={`w-full rounded-lg border p-3 text-left disabled:opacity-40 ${project?.id === entry.id && !creating ? 'border-purple-400/40 bg-purple-500/10' : 'border-white/5 hover:bg-white/5'}`} disabled={busy} aria-label={`프로젝트 열기: ${entry.name}`} onClick={() => void openProject(entry.id)}><span className="block truncate text-sm text-gray-200">{entry.name}</span><span className="mt-1 block text-[11px] text-gray-500">{entry.composition.width} × {entry.composition.height} · 파일 {entry.assetCount}개{(project?.id === entry.id ? dirty : hasDraft(entry.id)) && <span className="ml-2 text-amber-200">초안 있음</span>}</span></button>)}</div>
       </aside>
@@ -82,6 +90,8 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
         </div>
         <div className="rounded-xl border border-white/10 p-4" aria-label="프로젝트 파일"><div className="flex flex-wrap items-center justify-between gap-3"><h4 className="text-sm font-semibold text-white">파일 <span className="text-gray-500">{previewDocument!.assets.length}</span></h4><button className={buttonClass} disabled={busy || !connected || Boolean(remoteProject) || Boolean(pendingWrite)} onClick={() => assetInput.current?.click()}><ImagePlus size={15} />이미지 추가</button><input ref={assetInput} type="file" aria-label="프로젝트 이미지 파일" accept="image/png,image/jpeg,image/webp,image/gif" multiple className="sr-only" onChange={(event) => void addAssets(Array.from(event.target.files ?? []))} /></div><p className="mt-2 text-xs text-gray-500">PNG · JPG · WebP · GIF, 파일당 20 MB 이하. 추가한 파일은 프로젝트에 보관됩니다.</p>{previewDocument!.assets.length === 0 ? <p className="py-8 text-center text-sm text-gray-500">이미지나 로고를 추가하세요.</p> : <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">{previewDocument!.assets.map((entry) => <button key={entry.id} aria-label={`파일 보기: ${entry.name}`} className={`overflow-hidden rounded-lg border text-left ${selectedAsset === entry.id ? 'border-purple-400' : 'border-white/10 hover:border-white/25'}`} onClick={() => setSelectedAsset(entry.id)}><img src={studioApi.assetUrl(project.id, entry.id)} alt={entry.name} className="h-24 w-full bg-[#121318] object-contain" /><span className="block truncate px-2 pt-2 text-xs text-gray-300">{entry.name}</span><span className="block px-2 pb-2 pt-1 text-[11px] text-gray-500">{(entry.size / 1024).toFixed(1)} KB</span></button>)}</div>}{asset && <div className="mt-4 rounded-lg bg-black/15 p-3"><p className="mb-3 text-xs text-gray-400">파일 미리보기 · {asset.name}</p><img src={studioApi.assetUrl(project.id, asset.id)} alt={`파일 미리보기: ${asset.name}`} className="max-h-72 w-full object-contain" /></div>}</div>
         <div className="rounded-xl border border-purple-400/20 bg-purple-500/5 p-4" aria-label="현재 Codex에 작업 요청"><h4 className="text-sm font-semibold text-purple-100">현재 Codex에 작업 요청</h4><p className="mt-2 text-xs leading-relaxed text-gray-400">원하는 작업을 적고 요청 문구를 복사해 현재 대화에 붙여넣으세요. Codex의 소스 수정은 이 미리보기에 자동 반영됩니다.</p><label className="mt-3 block text-xs text-gray-400">원하는 작업<textarea aria-label="Codex에 요청할 작업" value={aiRequest} onChange={(event) => {setAiRequest(event.target.value); setCopyStatus('');}} placeholder="예: 추가한 이미지를 사용하고 제목에 자연스러운 등장 애니메이션을 넣어 주세요." className={`${inputClass} min-h-24`} /></label><button type="button" className={`${primaryClass} mt-3`} onClick={() => void copyRequest()}><Copy size={14} />프로젝트 요청 문구 복사</button>{copyStatus && <p role="status" className="mt-2 text-xs text-purple-200">{copyStatus}</p>}<details className="mt-3 text-xs text-gray-400"><summary className="cursor-pointer">복사 내용 보기</summary><textarea readOnly aria-label="Codex 요청 복사 내용" value={requestText} onFocus={(event) => event.target.select()} className={`${inputClass} min-h-48 font-mono text-xs`} /></details></div>
+        <StudioExportPanel project={project} frame={frame} dirty={dirty} connected={connected} onUseVideo={(result) => mediaTransfer.transfer('video', [result])} />
+        <StudioBundleDownload project={project} connected={connected} dirty={dirty} />
         <details className="rounded-xl border border-white/10 p-4 text-xs text-gray-500"><summary className="cursor-pointer text-gray-400">프로젝트 정보</summary><dl className="mt-3 space-y-2 break-all"><div><dt>프로젝트 ID</dt><dd className="select-all font-mono">{project.id}</dd></div><div><dt>소스 파일</dt><dd>{Object.keys(previewDocument!.source.files).join(', ')}</dd></div><div><dt>마지막 저장</dt><dd>{new Date(previewDocument!.updatedAt).toLocaleString('ko-KR')}</dd></div></dl></details>
       </div> : <div className="flex min-h-96 flex-col items-center justify-center rounded-xl border border-dashed border-white/10 p-8 text-center"><Palette size={32} className="text-purple-300" /><h3 className="mt-4 text-lg font-semibold text-white">첫 포스터를 시작하세요</h3><p className="mt-2 max-w-sm text-sm leading-relaxed text-gray-400">캔버스 크기를 정하고 이미지·로고를 보관할 프로젝트를 만드세요.</p><button className={`${primaryClass} mt-5`} disabled={!connected || busy} onClick={() => setCreating(true)}><Plus size={15} />빈 프로젝트 만들기</button><span className="mt-4 inline-flex items-center gap-1.5 text-xs text-gray-500"><CheckCircle2 size={13} />소스와 이미지가 함께 저장됩니다.</span></div>}
     </div>

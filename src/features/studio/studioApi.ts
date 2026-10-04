@@ -28,7 +28,7 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 1500
     return payload as T;
   } catch (error) {
     if (error instanceof StudioApiError) throw error;
-    throw new StudioApiError('로컬 서비스에 연결할 수 없습니다. 서비스를 실행한 뒤 다시 확인하세요.', 'CONNECTION_FAILED', 0);
+    throw new StudioApiError('로컬 서비스에 연결할 수 없습니다. 서비스 실행 상태와 이 사이트의 로컬 네트워크 접근 권한을 확인한 뒤 다시 연결하세요.', 'CONNECTION_FAILED', 0);
   } finally {
     clearTimeout(timer);
   }

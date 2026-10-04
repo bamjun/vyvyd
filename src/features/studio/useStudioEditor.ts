@@ -7,6 +7,7 @@ import {getLayerReorderPatch, readStudioLayerRegistry, type LayerGeometry} from 
 import {confirmStudioWrite} from '../../../packages/studio-runtime/src/write-confirmation.mjs';
 import {initialFields, settingsFor, type Fields} from './studioEditorSettings';
 import {studioApi, StudioApiError, type ProjectHistory, type ProjectRuntimeStatus, type ProjectSummary} from './studioApi';
+import {studioBundleApi} from './studioBundleApi';
 
 type Preview = {projectId: string; revision: number; url: string};
 type PendingWrite = {kind: 'save' | 'restore'; requestId: string; expectedRevision: number; submitted: StudioDraftSnapshot; project?: ProjectDocument; targetRevision?: number};
@@ -282,6 +283,15 @@ export function useStudioEditor(isActive: boolean) {
     try {const doc = await studioApi.create(settings); if (token === operation.current) {setPending(null); acceptProject(doc, false, undefined, true); setRecovery(null); setStatus('빈 프로젝트를 만들고 저장했습니다.');}}
     catch (cause) {if (token === operation.current) markFailure(cause);} finally {if (token === operation.current) setBusy(false);}
   };
+  const importProject = async (file: File) => {
+    if (!connectedRef.current || busyRef.current) return;
+    stash(); const token = ++operation.current; setBusy(true); setError('');
+    try {
+      const doc = await studioBundleApi.import(file);
+      if (mounted.current && token === operation.current) {setPending(null); acceptProject(doc, false, undefined, true); setRecovery(null); setStatus('프로젝트 파일을 새 프로젝트로 가져왔습니다. 소스 미리보기를 준비합니다.');}
+    } catch (cause) {if (token === operation.current) markFailure(cause);}
+    finally {if (token === operation.current) setBusy(false);}
+  };
   const addAssets = async (files: File[]) => {
     const base = projectRef.current; if (!base || remoteRef.current || pendingRef.current || !files.length) return;
     commitInteraction(); const token = ++operation.current; setBusy(true); setError(''); let current = base, count = 0; const failures: string[] = [];
@@ -332,7 +342,7 @@ export function useStudioEditor(isActive: boolean) {
     else if (event.key.toLowerCase() === 'y') {event.preventDefault(); redo();}
   };
   return {projects, project, fields, setFields, newFields, setNewFields, creating, setCreating, connected, busy, status, error, setError, selectedAsset, setSelectedAsset, frame, runtimeStatus, remoteProject, sourcePreview, aiRequest, setAiRequest, copyStatus, setCopyStatus, layerDraft, selectedLayer, layerGeometry, editMode, setEditMode, layerNotice, draftNotice, dirty, registry, previewComposition, previewEdits, inspectorDisabled, editingDisabled, asset, requestText, pendingWrite, recovery, versionHistory, selectedVersion,
-    playerRef, assetInput, connect, openProject: activate, reopenProject: () => project && activate(project.id, true), createProject, startCreating, save, addAssets, compile, copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer, adoptRemote,
+    playerRef, assetInput, connect, openProject: activate, reopenProject: () => project && activate(project.id, true), createProject, importProject, startCreating, save, addAssets, compile, copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer, adoptRemote,
     undo, redo, canUndo: editor.past.length > 0 || editor.transaction !== null, canRedo: editor.future.length > 0, beginInteraction, endInteraction, registerCancel, keyboardShortcut, refreshHistory, selectVersion, restoreVersion, restoreRecovery,
     hasDraft: (id: string) => {const session = sessions.current.get(id); return Boolean(session && !same(session.history.present, studioDraftForProject(session.base)) || read(draftKey(id), true));}};
 }

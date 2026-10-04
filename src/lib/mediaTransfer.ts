@@ -1,19 +1,20 @@
-export type MediaTarget = 'resize' | 'split' | 'merge';
+export type MediaTarget = 'resize' | 'split' | 'merge' | 'video';
 export interface MediaResultAsset { url: string; name: string }
 export type MediaReceiver = (files: File[]) => Promise<void>;
 
 export const MEDIA_TARGET_LABELS: Record<MediaTarget, string> = {
   resize: '크기 줄이기', split: '분할하기', merge: '합치기에 추가',
+  video: '영상 → GIF',
 };
 
 const SUPPORTED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
 /** Copy the result bytes before the source tool can revoke its preview URL. */
-export const materializeMediaResults = async (assets: readonly MediaResultAsset[]): Promise<File[]> => {
+export const materializeMediaResults = async (assets: readonly MediaResultAsset[], target: MediaTarget = 'resize'): Promise<File[]> => {
   if (!assets.length) throw new Error('전달할 결과가 없습니다.');
   return Promise.all(assets.map(async ({ url, name }) => {
-    if (!url.startsWith('blob:') && !url.startsWith('data:image/')) {
-      throw new Error('이 브라우저에서 만든 이미지 결과만 이어 편집할 수 있습니다.');
+    if (!url.startsWith('blob:') && !(target !== 'video' && url.startsWith('data:image/'))) {
+      throw new Error(target === 'video' ? '이 브라우저에서 만든 영상 결과만 이어 편집할 수 있습니다.' : '이 브라우저에서 만든 이미지 결과만 이어 편집할 수 있습니다.');
     }
     let blob: Blob;
     try {
@@ -23,8 +24,8 @@ export const materializeMediaResults = async (assets: readonly MediaResultAsset[
     } catch {
       throw new Error('결과 파일을 읽지 못했습니다. 결과를 다시 생성한 뒤 시도해 주세요.');
     }
-    if (!blob.size || !SUPPORTED_TYPES.has(blob.type)) {
-      throw new Error('JPG, PNG, WebP, GIF 결과만 이어 편집할 수 있습니다.');
+    if (!blob.size || !(target === 'video' ? blob.type === 'video/mp4' : SUPPORTED_TYPES.has(blob.type))) {
+      throw new Error(target === 'video' ? 'MP4 결과만 영상 도구로 이어 편집할 수 있습니다.' : 'JPG, PNG, WebP, GIF 결과만 이어 편집할 수 있습니다.');
     }
     return new File([blob], name, { type: blob.type });
   }));
@@ -49,7 +50,7 @@ export const createMediaTransfer = ({ onBusy, onDelivered }: TransferCallbacks) 
       transferring = true;
       onBusy(true);
       try {
-        const files = await materializeMediaResults(assets);
+        const files = await materializeMediaResults(assets, target);
         const receive = receivers.get(target);
         if (!receive) throw new Error('편집 도구를 준비하지 못했습니다. 다시 시도해 주세요.');
         await receive(files);

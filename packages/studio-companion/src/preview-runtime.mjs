@@ -21,6 +21,17 @@ const browserDefaults = [
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
 ];
 const defaultParentOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173', 'https://vyvyd.pages.dev'];
+const normalizedParentOrigins = (origins) => {
+  if (!Array.isArray(origins)) throw new TypeError('Preview parent origins must be an array.');
+  return [...new Set(origins.map((value) => {
+    if (typeof value !== 'string') throw new TypeError('Preview parent origins must be HTTP or HTTPS origins.');
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin === 'null') {
+      throw new TypeError('Preview parent origins must be HTTP or HTTPS origins.');
+    }
+    return parsed.origin;
+  }))].sort();
+};
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const mimeTypes = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8', '.map': 'application/json; charset=utf-8',
@@ -211,7 +222,7 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
     const project = validateProjectDocument(document);
     const parsedOrigin = new URL(origin);
     if (!['http:', 'https:'].includes(parsedOrigin.protocol)) throw new TypeError('Preview origin must be HTTP or HTTPS.');
-    const trustedParents = parentOrigins.map((item) => new URL(item).origin);
+    const trustedParents = normalizedParentOrigins(parentOrigins);
     if (!Number.isFinite(frame)) throw new TypeError('Preview frame must be finite.');
     if (!browserExecutable) throw new StudioPreviewError('Chrome 또는 Edge 설치 경로를 확인할 수 없습니다.');
     await ensureRoot();
@@ -250,7 +261,7 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
       await writeFile(path.join(directory, 'snapshot.json'), JSON.stringify(snapshot));
       await writeFile(path.join(directory, 'player.html'), createPreviewPlayerHtml(snapshot));
       const record = {previewId, projectId: project.id, revision: project.revision, directory, previewProtocolVersion: 4,
-        inputProps, composition: project.composition, layerMetadata, state: 'preparing'};
+        inputProps, composition: project.composition, layerMetadata, parentOrigins: trustedParents, state: 'preparing'};
       versions.set(previewId, record);
       stage = 'compile';
       await bundle({entryPoint: path.join(directory, project.source.entryPoint), rootDir: repoRoot,
@@ -321,10 +332,11 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
 
   // A failed compare-and-swap draft can share a revision with the saved project.
   // Restore only snapshots whose code and every caller-controlled prop still match.
-  const findSnapshot = async (document, {origin = 'http://127.0.0.1:4180'} = {}) => {
+  const findSnapshot = async (document, {origin = 'http://127.0.0.1:4180', parentOrigins = defaultParentOrigins} = {}) => {
     const project = validateProjectDocument(document);
     const parsedOrigin = new URL(origin);
     if (!['http:', 'https:'].includes(parsedOrigin.protocol)) throw new TypeError('Preview origin must be HTTP or HTTPS.');
+    const trustedParents = normalizedParentOrigins(parentOrigins);
     const info = await lstat(root).catch((error) => {if (error.code === 'ENOENT') return null; throw error;});
     if (!info) return null;
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Preview storage must be a regular directory.');
@@ -337,6 +349,17 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
       const record = await loadVersion(item.name);
       if (!record || record.previewProtocolVersion !== 4 || record.state !== 'ready' || record.projectId !== project.id
         || record.revision !== project.revision || record.sourceHash !== sourceHash) continue;
+      // A saved player embeds its exact parent allowlist. Reusing it after the
+      // local service's configured HTTPS origin changes would reject the new
+      // page's messages (or keep accepting a removed origin). Legacy records
+      // kept this list only in snapshot.json, so inspect that immutable file.
+      let recordedParents = record.parentOrigins;
+      if (!recordedParents) {
+        const snapshotFile = await readonlyFile(record.directory, 'snapshot.json');
+        if (!snapshotFile) continue;
+        try {recordedParents = JSON.parse(await readFile(snapshotFile, 'utf8')).parentOrigins;} catch {continue;}
+      }
+      try {if (!isDeepStrictEqual(normalizedParentOrigins(recordedParents), trustedParents)) continue;} catch {continue;}
       const props = record.inputProps;
       const snapshotProps = props && {composition: props.composition, backgroundColor: props.backgroundColor,
         layers: props.layers, assets: props.assets};
@@ -352,5 +375,17 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
       composition: {...project.composition}, diagnostics: [], layerMetadata: record.layerMetadata ?? [],
       validatedFrames: record.validatedFrames ?? [], revision: project.revision, projectId: project.id};
   };
-  return {prepare, handle, renderPreview, findSnapshot};
+  // Internal renderer access only: callers get immutable props and a served URL,
+  // never a source-directory path that HTTP clients could use to escape storage.
+  const getExportSnapshot = async (previewId, {origin = 'http://127.0.0.1:4180'} = {}) => {
+    const record = await loadVersion(previewId);
+    if (!record || record.state !== 'ready' || !await readonlyFile(record.directory, 'render/bundle.js')) {
+      throw new StudioPreviewError('출력에 사용할 정상 미리보기 버전을 찾을 수 없습니다.');
+    }
+    const parsed = new URL(origin);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new TypeError('Output origin must be HTTP or HTTPS.');
+    return {serveUrl: `${parsed.origin}/previews/${record.previewId}/render/`,
+      composition: structuredClone(record.composition), inputProps: structuredClone(record.inputProps)};
+  };
+  return {prepare, handle, renderPreview, findSnapshot, getExportSnapshot};
 }

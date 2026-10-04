@@ -36,9 +36,9 @@ function App() {
 
   return (
     <MediaTransferProvider onNavigate={(target) => {
-      setEditorMode(target);
-      setActiveTab('editor');
-      requestAnimationFrame(() => document.getElementById('editor-panel')?.scrollIntoView({ block: 'start' }));
+      if (target === 'video') setActiveTab('video');
+      else {setEditorMode(target); setActiveTab('editor');}
+      requestAnimationFrame(() => document.getElementById(target === 'video' ? 'video-panel' : 'editor-panel')?.scrollIntoView({ block: 'start' }));
     }}>
     <div className="min-h-screen gradient-bg flex flex-col justify-between">
       {/* Top Banner / Header */}
@@ -52,7 +52,7 @@ function App() {
               <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-purple-400 to-indigo-300 bg-clip-text text-transparent">
                 vyvyd
               </h1>
-              <p className="text-[10px] text-gray-400 font-medium">LOCAL MULTIMEDIA WORKSPACE</p>
+              <p className="text-[10px] text-gray-400 font-medium">이미지 · 영상 · 포스터 작업 공간</p>
             </div>
           </div>
 
@@ -79,7 +79,7 @@ function App() {
             {activeTab === 'studio' ? '포스터 메이커' : 'Convert, Resize, Crop & Merge'}
           </h2>
           <p className="text-gray-400 text-sm md:text-base">
-            {activeTab === 'studio' ? '포스터와 홍보지를 위한 작업 공간. 프로젝트와 이미지를 이 컴퓨터에 저장하세요.' : 'Processing happens 100% on your device. Results are uploaded only when you choose to send them to Discord.'}
+            {activeTab === 'studio' ? '브라우저에서 편집하고, 이 컴퓨터의 로컬 서비스에 저장·출력하세요. 새로운 디자인은 현재 Codex 대화에서 요청할 수 있습니다.' : '영상 변환과 이미지 편집은 브라우저에서 처리합니다. 결과는 다운로드하거나 선택해 Discord로 보낼 수 있습니다.'}
           </p>
         </div>
 
@@ -169,9 +169,9 @@ function App() {
               <Zap className="w-6 h-6 text-purple-400" />
             </div>
             <div>
-              <h4 className="font-semibold text-gray-200 mb-1">Instant Performance</h4>
+              <h4 className="font-semibold text-gray-200 mb-1">{activeTab === 'studio' ? '저장 버전으로 출력' : '탭을 옮겨도 작업 유지'}</h4>
               <p className="text-xs text-gray-400 leading-relaxed">
-                Utilizes Web Workers and Canvas acceleration inside your browser. No queue times, no lag.
+                {activeTab === 'studio' ? 'PNG·GIF·MP4는 출력 시작 때의 저장본을 사용합니다. 출력 중에도 편집을 이어가고 작업별로 취소·재시도할 수 있습니다.' : '다른 도구로 이동해도 파일·설정·결과를 유지합니다. 진행 중인 작업은 계속되며 처리 화면에서 취소할 수 있습니다.'}
               </p>
             </div>
           </div>
@@ -181,9 +181,9 @@ function App() {
               <ShieldAlert className="w-6 h-6 text-green-400" />
             </div>
             <div>
-              <h4 className="font-semibold text-gray-200 mb-1">Local by Default</h4>
+              <h4 className="font-semibold text-gray-200 mb-1">{activeTab === 'studio' ? '이 컴퓨터에 보관' : '브라우저에서 처리'}</h4>
               <p className="text-xs text-gray-400 leading-relaxed">
-                Processing stays on your computer. Files leave your device only when you choose to send them to Discord.
+                {activeTab === 'studio' ? '프로젝트·이미지·저장 이력·출력 파일은 로컬 서비스가 디스크에 보관합니다. 프로젝트 파일을 다운로드해 다른 컴퓨터로 옮길 수 있습니다.' : '영상·이미지 변환은 브라우저 안에서 실행합니다. Discord 전송은 선택할 때만 실행하며, 페이지를 닫기 전 결과를 다운로드하세요.'}
               </p>
             </div>
           </div>
@@ -193,9 +193,9 @@ function App() {
               <Film className="w-6 h-6 text-indigo-400" />
             </div>
             <div>
-              <h4 className="font-semibold text-gray-200 mb-1">Scale Control</h4>
+              <h4 className="font-semibold text-gray-200 mb-1">{activeTab === 'studio' ? '현재 Codex와 함께' : '결과 이어 편집'}</h4>
               <p className="text-xs text-gray-400 leading-relaxed">
-                Easily optimize dimensions and frame rates to control the final output file sizes.
+                {activeTab === 'studio' ? '작업 요청을 복사해 현재 Codex 대화에 붙여넣으세요. Codex가 읽은 소스·이미지·편집 값은 그 대화의 AI 처리에 사용될 수 있습니다.' : '결과를 크기 줄이기·분할·합치기로 전달하세요. 대상 도구의 기존 파일과 설정을 유지하며 편집을 이어갈 수 있습니다.'}
               </p>
             </div>
           </div>
@@ -207,14 +207,10 @@ function App() {
       <footer className="border-t border-white/5 py-8 text-center text-xs text-gray-500 bg-[#07080b]">
         <div className="max-w-6xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0">
           <div>
-            © {new Date().getFullYear()} vyvyd. All processing occurs locally; Discord upload is always optional.
+            © {new Date().getFullYear()} vyvyd. 영상·이미지 편집은 브라우저에서, 포스터 저장·출력은 이 컴퓨터의 로컬 서비스에서 처리합니다.
           </div>
           <div className="flex space-x-4">
-            <span className="hover:text-gray-400 transition cursor-help">HTML5 Canvas</span>
-            <span>•</span>
-            <span className="hover:text-gray-400 transition cursor-help">gifshot</span>
-            <span>•</span>
-            <span className="hover:text-gray-400 transition cursor-help">gifuct-js</span>
+            <span>Discord 전송 · Codex 요청은 선택할 때 사용합니다.</span>
           </div>
         </div>
       </footer>

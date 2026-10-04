@@ -313,6 +313,43 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
       }
       return document;
     },
+    async importProject({project, assets} = {}) {
+      const original = validate(project);
+      if (!Array.isArray(assets) || assets.length !== original.assets.length || assets.length > MAX_PROJECT_ASSETS) {
+        fail('INVALID_PROJECT_BUNDLE', '프로젝트의 모든 이미지가 정확히 한 번씩 필요합니다.');
+      }
+      const payloads = new Map();
+      for (const item of assets) {
+        const asset = original.assets.find((asset) => asset.id === item?.id);
+        if (!asset || payloads.has(item.id) || !Buffer.isBuffer(item.bytes) || item.bytes.length !== asset.size || item.bytes.length > MAX_ASSET_BYTES) {
+          fail('INVALID_PROJECT_BUNDLE', '프로젝트 이미지 데이터가 올바르지 않습니다.');
+        }
+        assertAssetName(asset.name);
+        const image = identifyImage(item.bytes);
+        if (image.mimeType !== asset.mimeType || asset.relativePath !== `assets/${asset.id}.${image.extension}`) {
+          fail('INVALID_PROJECT_BUNDLE', '이미지 형식 또는 경로가 프로젝트 파일의 정보와 다릅니다.');
+        }
+        payloads.set(item.id, item.bytes);
+      }
+      const now = new Date().toISOString();
+      const suffix = ' (가져옴)';
+      const document = validate({...original, id: randomUUID(), name: `${Array.from(original.name).slice(0, 80 - Array.from(suffix).length).join('')}${suffix}`,
+        revision: 1, createdAt: now, updatedAt: now});
+      const directory = await projectDirectory(document.id, true);
+      try {
+        // Until persist's final canonical rename, listProjects ignores this uncommitted UUID directory.
+        for (const asset of document.assets) await writeAtomic(directory, asset.relativePath, payloads.get(asset.id));
+        await persist(document);
+      } catch (error) {
+        // Only this freshly created UUID directory may be removed, never the imported/original ID.
+        const relative = path.relative(root, directory);
+        const stat = await lstat(directory).catch(() => null);
+        if (relative === document.id && path.dirname(directory) === root && UUID.test(path.basename(directory))
+          && stat?.isDirectory() && !stat.isSymbolicLink()) await rm(directory, {recursive: true, force: true});
+        throw error;
+      }
+      return document;
+    },
     async updateProject(id, {expectedRevision, project, requestId, fingerprint} = {}) {
       id = assertId(id);
       const identity = requestIdentity(requestId, fingerprint, 'update');

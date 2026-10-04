@@ -91,6 +91,7 @@ test('restart restore matches source and all editable props rather than revision
     await writeFile(path.join(directory, 'render', 'player.js'), '/* ready */');
     await writeFile(path.join(directory, 'preview.json'), JSON.stringify({previewId,
       state: 'ready', previewProtocolVersion, projectId: document.id, revision: document.revision, createdAt,
+      parentOrigins: ['http://127.0.0.1:5173', 'http://localhost:5173', 'https://vyvyd.pages.dev'],
       sourceHash: createHash('sha256').update(JSON.stringify(document.source)).digest('hex'),
       inputProps: {composition: document.composition, backgroundColor: document.edits.backgroundColor,
         layers: document.edits.layers, assets: document.assets, assetUrls: {}},

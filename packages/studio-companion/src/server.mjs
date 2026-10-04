@@ -1,10 +1,14 @@
 import {createServer} from 'node:http';
+import {createReadStream} from 'node:fs';
+import {pipeline} from 'node:stream/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createProjectStore, DEFAULT_DATA_DIR, MAX_ASSET_BYTES, StudioStoreError} from './project-store.mjs';
 import {createStudioController} from './studio-controller.mjs';
 import {parseTool} from './codex-tools.mjs';
 import {createWorkerPreviewRuntime} from './worker-preview-runtime.mjs';
+import {createExportManager} from './export-manager.mjs';
+import {exportProjectBundle, importProjectBundle, MAX_BUNDLE_JSON_BYTES} from './project-bundle.mjs';
 
 const DEFAULT_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173', 'https://vyvyd.pages.dev'];
 const JSON_BODY_LIMIT = 8 * 1024 * 1024;
@@ -59,8 +63,13 @@ const json = (response, statusCode, value) => {
   response.writeHead(statusCode, {'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body)});
   response.end(body);
 };
+const bundleBytes = (bundle) => {
+  const bytes = Buffer.from(JSON.stringify(bundle));
+  if (bytes.length > MAX_BUNDLE_JSON_BYTES) throw error('BUNDLE_TOO_LARGE', '프로젝트 파일 전체 크기는 145 MiB 이하여야 합니다.', 413);
+  return bytes;
+};
 
-export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins = [], previewRuntime} = {}) {
+export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins = [], previewRuntime, exportRenderer, exportDataDir} = {}) {
   const origins = new Set([...DEFAULT_ORIGINS, ...allowedOrigins].map((origin) => {
     const parsed = new URL(origin);
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin === 'null') throw new TypeError('Allowed origins must be HTTP or HTTPS origins');
@@ -73,6 +82,8 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
     const address = server.address();
     return `http://127.0.0.1:${address?.port ?? 4180}`;
   }});
+  const exports = createExportManager({store, runtime, dataDir: exportDataDir ?? path.join(path.dirname(store.dataDir), 'exports'),
+    origin: () => `http://127.0.0.1:${server.address()?.port ?? 4180}`, ...(exportRenderer ? {runRender: exportRenderer} : {})});
 
   const server = createServer(async (request, response) => {
     response.setHeader('Vary', 'Origin');
@@ -88,6 +99,24 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
       if (pathname.includes('\\') || pathname.includes('%') || pathname.split('/').includes('..')) throw error('INVALID_PATH', '올바른 프로젝트 경로가 필요합니다.');
       // Opaque sandbox previews can only read immutable preview snapshots, never project APIs.
       if (pathname.startsWith('/previews/')) {
+        // Older PNA clients preflight even read-only local resources. This must
+        // run before the snapshot GET/HEAD handler, while retaining the same
+        // exact-origin boundary as the project APIs.
+        if (request.method === 'OPTIONS') {
+          const previewOrigin = request.headers.origin;
+          if (typeof previewOrigin !== 'string' || !origins.has(previewOrigin)) {
+            throw error('ORIGIN_NOT_ALLOWED', '허용된 vyvyd 화면에서만 연결할 수 있습니다.', 403);
+          }
+          if (!['GET', 'HEAD'].includes(request.headers['access-control-request-method'])) {
+            throw error('METHOD_NOT_ALLOWED', '미리보기 파일은 읽기만 가능합니다.', 405);
+          }
+          response.setHeader('Access-Control-Allow-Origin', previewOrigin);
+          response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+          response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+          response.setHeader('Access-Control-Max-Age', '600');
+          if (request.headers['access-control-request-private-network'] === 'true') response.setHeader('Access-Control-Allow-Private-Network', 'true');
+          response.writeHead(204); response.end(); return;
+        }
         if (!['GET', 'HEAD'].includes(request.method)) throw error('METHOD_NOT_ALLOWED', '미리보기 파일은 읽기만 가능합니다.', 405);
         if (await runtime.handle(request, response)) return;
         throw error('NOT_FOUND', '미리보기 파일을 찾을 수 없습니다.', 404);
@@ -137,6 +166,50 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         if (request.method === 'GET') json(response, 200, await store.listProjects());
         else if (request.method === 'POST') json(response, 201, await store.createProject(await readJson(request)));
         else throw error('METHOD_NOT_ALLOWED', '지원하지 않는 요청 방식입니다.', 405);
+        return;
+      }
+      if (pathname === '/projects/import') {
+        if (request.method !== 'POST') throw error('METHOD_NOT_ALLOWED', '프로젝트 가져오기는 POST를 사용합니다.', 405);
+        json(response, 201, await importProjectBundle(store, await readJson(request, MAX_BUNDLE_JSON_BYTES)));
+        return;
+      }
+      const bundleRoute = /^\/projects\/([^/]+)\/bundle$/.exec(pathname);
+      if (bundleRoute) {
+        if (request.method !== 'POST') throw error('METHOD_NOT_ALLOWED', '프로젝트 파일 만들기는 POST를 사용합니다.', 405);
+        const input = await readJson(request);
+        const bundle = await exportProjectBundle(store, bundleRoute[1], input.expectedRevision);
+        const bytes = bundleBytes(bundle);
+        response.writeHead(200, {'Content-Type': 'application/json', 'Content-Length': bytes.length,
+          'Content-Disposition': `attachment; filename="project-v${bundle.project.revision}.vyvyd.json"`});
+        response.end(bytes); return;
+      }
+      const bundleFileRoute = /^\/projects\/([^/]+)\/bundle\/([1-9]\d*)$/.exec(pathname);
+      if (bundleFileRoute) {
+        if (!['GET', 'HEAD'].includes(request.method)) throw error('METHOD_NOT_ALLOWED', '프로젝트 파일은 읽기만 가능합니다.', 405);
+        const revision = Number(bundleFileRoute[2]);
+        const snapshotStore = {readProject: (id) => store.readHistory(id, revision), readAsset: (id, assetId) => store.readAsset(id, assetId)};
+        const bundle = await exportProjectBundle(snapshotStore, bundleFileRoute[1], revision);
+        const bytes = bundleBytes(bundle);
+        const filename = `${bundle.project.name.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '_')}-v${revision}.vyvyd.json`;
+        response.writeHead(200, {'Content-Type': 'application/json', 'Content-Length': bytes.length,
+          'Content-Disposition': `attachment; filename="project-v${revision}.vyvyd.json"; filename*=UTF-8''${encodeURIComponent(filename)}`});
+        response.end(request.method === 'HEAD' ? undefined : bytes); return;
+      }
+      const exportRoute = /^\/projects\/([^/]+)\/exports(?:\/([^/]+)(?:\/(cancel|retry|file))?)?$/.exec(pathname);
+      if (exportRoute) {
+        const [, projectId, jobId, action] = exportRoute;
+        if (!jobId && request.method === 'GET') json(response, 200, await exports.list(projectId));
+        else if (!jobId && request.method === 'POST') json(response, 202, await exports.start(projectId, await readJson(request)));
+        else if (jobId && !action && request.method === 'GET') json(response, 200, await exports.get(projectId, jobId));
+        else if (action === 'cancel' && request.method === 'POST') {await readJson(request); json(response, 200, await exports.cancel(projectId, jobId));}
+        else if (action === 'retry' && request.method === 'POST') json(response, 202, await exports.retry(projectId, jobId, await readJson(request)));
+        else if (action === 'file' && ['GET', 'HEAD'].includes(request.method)) {
+          const result = await exports.readResult(projectId, jobId);
+          response.writeHead(200, {'Content-Type': result.mimeType, 'Content-Length': result.size,
+            'Content-Disposition': `attachment; filename="poster.${result.mimeType === 'video/mp4' ? 'mp4' : result.mimeType === 'image/gif' ? 'gif' : 'png'}"; filename*=UTF-8''${encodeURIComponent(result.filename)}`});
+          if (request.method === 'HEAD') response.end();
+          else await pipeline(createReadStream(result.path), response);
+        } else throw error('METHOD_NOT_ALLOWED', '지원하지 않는 출력 요청 방식입니다.', 405);
         return;
       }
       const projectRoute = /^\/projects\/([^/]+)$/.exec(pathname);
@@ -212,13 +285,15 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
     } catch (cause) {
       request.resume();
       if (response.destroyed || response.writableEnded) return;
+      if (response.headersSent) {response.destroy(); return;}
       const known = cause instanceof StudioStoreError;
       json(response, known ? cause.statusCode : 500, {error: {code: known ? cause.code : 'INTERNAL_ERROR', message: known ? cause.message : '로컬 프로젝트 저장소에서 오류가 발생했습니다.', ...(known && cause.diagnostics ? {diagnostics: cause.diagnostics} : {})}});
     }
   });
   server.requestTimeout = 30_000;
   server.headersTimeout = 15_000;
-  server.studio = {store, controller, runtime};
+  server.studio = {store, controller, runtime, exports};
+  server.once('close', () => {void exports.shutdown();});
   return server;
 }
 
@@ -229,5 +304,5 @@ if (direct) {
   const server = createStudioServer({dataDir: process.env.STUDIO_DATA_DIR ?? DEFAULT_DATA_DIR, allowedOrigins: process.env.STUDIO_ALLOWED_ORIGIN ? [process.env.STUDIO_ALLOWED_ORIGIN] : []});
   server.listen(port, '127.0.0.1', () => process.stdout.write(`vyvyd studio: http://127.0.0.1:${port}\n`));
   server.on('error', (cause) => {process.stderr.write(`${cause.message}\n`); process.exitCode = 1;});
-  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => server.close());
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {server.close(); void server.studio.exports.shutdown();});
 }

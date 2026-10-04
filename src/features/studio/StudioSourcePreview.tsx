@@ -132,7 +132,7 @@ export default function StudioSourcePreview({projectId, revision, previewUrl, co
 
   return <div className="w-full" style={{maxWidth: Math.min(560, 520 * composition.width / composition.height)}}>
     <div className="relative overflow-hidden" style={{aspectRatio: `${composition.width}/${composition.height}`}}>
-      {safeUrl && <iframe ref={iframe} src={safeUrl} title="Remotion 프로젝트 미리보기" data-testid="studio-source-preview" className="absolute inset-0 h-full w-full border-0" sandbox="allow-scripts" onLoad={() => send('sync')} allow="autoplay; fullscreen" />}
+      {safeUrl && <iframe ref={iframe} src={safeUrl} title="Remotion 프로젝트 미리보기" data-testid="studio-source-preview" className="absolute inset-0 h-full w-full border-0" sandbox="allow-scripts" referrerPolicy="origin" onLoad={() => send('sync')} allow="autoplay; fullscreen" />}
       {!ready && !failure && <p className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#0a0b10]/80 p-4 text-center text-xs text-gray-400">소스 미리보기를 연결하고 있습니다…</p>}
       {ready && editMode && !failure && <StudioLayerOverlay key={`${projectId}-${revision}`} registry={registry} edits={edits.layers} geometry={geometry} geometryReady={geometryStamp?.token === syncToken && geometryStamp.frame === frame} composition={composition} selectedId={selectedLayerId} disabled={editingDisabled || !isActive} onSelect={onSelectLayer} onChange={onChangeLayer} onBeginInteraction={onBeginInteraction} onEndInteraction={onEndInteraction} onRegisterCancelInteraction={onRegisterCancelInteraction} />}
     </div>

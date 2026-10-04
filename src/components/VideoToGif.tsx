@@ -15,6 +15,7 @@ import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { useProcessingTask } from '@/hooks/useProcessingTask';
 import { CancelProcessingButton } from './CancelProcessingButton';
 import { useDiscordWebhookSender } from '@/hooks/useDiscordWebhookSender';
+import { useMediaReceiver, useMediaTransfer } from '@/hooks/useMediaTransfer';
 import { VideoOutputSettings } from './VideoOutputSettings';
 import { VideoOutputPreview } from './VideoOutputPreview';
 import { TargetSizeControl } from './TargetSizeControl';
@@ -70,12 +71,19 @@ const FILE_STATUS_LABELS: Record<VideoBatchFileState['status'], string> = {
   waiting: '대기 중', processing: '변환 중', succeeded: '완료', failed: '실패', cancelled: '미완료',
 };
 
-const loadVideoMetadata = (src: string): Promise<HTMLVideoElement> =>
+const loadVideoMetadata = (src: string): Promise<{videoWidth: number; videoHeight: number; duration: number}> =>
   new Promise((resolve, reject) => {
     const video = document.createElement('video');
     video.preload = 'metadata';
-    video.onloadedmetadata = () => resolve(video);
-    video.onerror = () => reject(new Error('영상을 읽을 수 없습니다.'));
+    const clean = () => {clearTimeout(timer); video.onloadedmetadata = null; video.onerror = null; video.removeAttribute('src'); video.load();};
+    const timer = setTimeout(() => {clean(); reject(new Error('영상 정보를 읽는 시간이 초과되었습니다.'));}, 30000);
+    video.onloadedmetadata = () => {
+      // Copy metadata before releasing the decoder's source.
+      const metadata = {videoWidth: video.videoWidth, videoHeight: video.videoHeight, duration: video.duration};
+      clearTimeout(timer); video.onloadedmetadata = null; video.onerror = null;
+      resolve(metadata); video.removeAttribute('src'); video.load();
+    };
+    video.onerror = () => {clean(); reject(new Error('영상을 읽을 수 없습니다.'));};
     video.src = src;
     video.load();
   });
@@ -105,9 +113,12 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputUrlsRef = useRef<Set<string>>(new Set());
+  const loadingRef = useRef(false);
+  const mountedRef = useRef(true);
   const resultUrlsRef = useRef<Set<string>>(new Set());
   const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
+  const { notice: transferNotice } = useMediaTransfer();
   const selectedVideo = videoItems.find((item) => item.id === selectedVideoId) ?? videoItems[0];
   const settings = selectedVideo?.settings ?? EMPTY_SETTINGS;
   const { crop, cropPreset = 'free', startTime, endTime, outputWidth, outputHeight, scale, aspectLocked, fitMode } = settings;
@@ -119,7 +130,9 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   }, [isActive]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       inputUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       resultUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     };
@@ -131,7 +144,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   const reset = () => {
-    if (isProcessing) return;
+    if (isProcessing || loadingRef.current) return;
     clearUrls(inputUrlsRef.current);
     clearUrls(resultUrlsRef.current);
     setVideoItems([]);
@@ -145,11 +158,42 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
     setSettingsNotice('');
   };
 
+  useMediaReceiver('video', async (files) => {
+    if (isProcessing || loadingRef.current) throw new Error('영상 도구가 처리 중입니다. 완료한 뒤 다시 전달해 주세요.');
+    loadingRef.current = true;
+    setIsLoadingVideos(true);
+    const stagedUrls = new Set<string>();
+    try {
+      const loaded = await Promise.allSettled(files.map(async (file): Promise<VideoItem> => {
+        const src = URL.createObjectURL(file);
+        stagedUrls.add(src); inputUrlsRef.current.add(src);
+        const video = await loadVideoMetadata(src);
+        const metadata = {width: video.videoWidth, height: video.videoHeight, duration: video.duration};
+        if (!metadata.width || !metadata.height || !Number.isFinite(metadata.duration) || metadata.duration <= 0) throw new Error('영상 크기 또는 재생 시간을 확인할 수 없습니다.');
+        return {id: crypto.randomUUID(), file, src, ...metadata, settings: createVideoSettings(metadata)};
+      }));
+      const failure = loaded.find((item) => item.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
+      if (!mountedRef.current) throw new Error('영상 도구가 닫혔습니다.');
+      const items = loaded.flatMap((item) => item.status === 'fulfilled' ? [item.value] : []);
+      setVideoItems((existing) => [...existing, ...items]);
+      setSelectedVideoId(items[0]?.id ?? '');
+      setErrorMessage('');
+    } catch (cause) {
+      stagedUrls.forEach((url) => {URL.revokeObjectURL(url); inputUrlsRef.current.delete(url);});
+      throw cause;
+    } finally {
+      loadingRef.current = false;
+      if (mountedRef.current) setIsLoadingVideos(false);
+    }
+  });
+
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith('video/'));
-    if (files.length === 0 || isProcessing || isLoadingVideos) return;
+    if (files.length === 0 || isProcessing || loadingRef.current) return;
 
     reset();
+    loadingRef.current = true;
     setIsLoadingVideos(true);
     setErrorMessage('');
 
@@ -186,6 +230,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
       setVideoItems([]);
       setErrorMessage('일부 영상을 읽을 수 없습니다. MP4 파일을 다시 선택해 주세요.');
     } finally {
+      loadingRef.current = false;
       setIsLoadingVideos(false);
       event.target.value = '';
     }
@@ -238,7 +283,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   const convertToGif = async (targets: VideoItem[], preserveResults = false) => {
-    if (targets.length === 0 || isProcessing) return;
+    if (targets.length === 0 || isProcessing || loadingRef.current) return;
 
     if (invalidSizeTarget) {
       setErrorMessage('목표 용량을 1 KB에서 100 MB 사이로 입력해 주세요.');
@@ -403,6 +448,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
 
   return (
     <div className="space-y-8">
+      {transferNotice?.target === 'video' && <p role="status" className="rounded-xl border border-purple-400/20 p-3 text-sm text-purple-200">{transferNotice.message}</p>}
       <input ref={fileInputRef} type="file" accept="video/mp4,video/*" multiple onChange={handleFileChange} disabled={isProcessing || isLoadingVideos} className="hidden" aria-label="동영상 파일 선택" />
       {!selectedVideo ? (
         <div className="flex flex-col items-center justify-center border-2 border-dashed border-purple-500/20 hover:border-purple-500/50 rounded-2xl p-12 bg-white/5 transition duration-300">

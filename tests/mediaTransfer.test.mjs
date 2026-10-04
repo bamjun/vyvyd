@@ -42,6 +42,32 @@ const recorder = (api) => {
   return { controller, busy, delivered };
 };
 
+test('MP4 handoff copies exact bytes and survives revocation without permitting image targets', async (t) => {
+  const bytes = Uint8Array.from(Buffer.from('mp4-result-with-all-frames'));
+  const asset = assetFor(t, new Blob([bytes], {type: 'video/mp4'}), '포스터.mp4');
+  const api = loadTransfer();
+  await assert.rejects(api.materializeMediaResults([asset]), /JPG, PNG, WebP, GIF/);
+  const {controller, delivered} = recorder(api);
+  let received;
+  controller.register('video', async ([file]) => {received = file; URL.revokeObjectURL(asset.url);});
+  await controller.transfer('video', [asset]);
+  assert.equal(received.type, 'video/mp4');
+  assert.equal(received.name, '포스터.mp4');
+  assert.deepEqual(new Uint8Array(await received.arrayBuffer()), bytes);
+  assert.deepEqual(delivered, [['video', 1]]);
+});
+
+test('video handoff rejects images and a busy destination without navigating', async (t) => {
+  const {controller, delivered, busy} = recorder(loadTransfer());
+  const gif = assetFor(t, gifBlob());
+  await assert.rejects(controller.transfer('video', [gif]), /MP4 결과만/);
+  const mp4 = assetFor(t, new Blob(['video'], {type:'video/mp4'}), 'poster.mp4');
+  controller.register('video', async () => {throw new Error('영상 도구가 처리 중입니다.');});
+  await assert.rejects(controller.transfer('video', [mp4]), /처리 중/);
+  assert.deepEqual(delivered, []);
+  assert.deepEqual(busy, [true, false, true, false]);
+});
+
 test('materialized results preserve names, MIME types and exact bytes including every GIF frame', async (t) => {
   const api = loadTransfer();
   const fixtures = [
