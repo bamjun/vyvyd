@@ -1,0 +1,38 @@
+{
+  "name": "@bamjun/vyvyd-studio",
+  "version": "0.1.0",
+  "description": "Local poster projects, Remotion previews and exports, and MCP tools for the vyvyd Poster Maker",
+  "type": "module",
+  "bin": {
+    "vyvyd-studio": "bin/cli.mjs"
+  },
+  "files": ["bin/cli.mjs", "dist", "README.md", "LICENSE"],
+  "engines": {"node": ">=22.14.0"},
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs"
+  },
+  "publishConfig": {"access": "public", "registry": "https://registry.npmjs.org/"},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bamjun/vyvyd.git",
+    "directory": "packages/studio-companion"
+  },
+  "homepage": "https://vyvyd.pages.dev/?studio=1",
+  "bugs": {"url": "https://github.com/bamjun/vyvyd/issues"},
+  "keywords": ["poster", "remotion", "mcp", "codex", "vyvyd"],
+  "license": "MIT",
+  "dependencies": {
+    "@fontsource/noto-sans-kr": "5.3.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "@remotion/browser-bundler": "4.0.532",
+    "@remotion/bundler": "4.0.532",
+    "@remotion/canvas": "4.0.532",
+    "@remotion/player": "4.0.532",
+    "@remotion/renderer": "4.0.532",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.532",
+    "zod": "3.23.8"
+  }
+}

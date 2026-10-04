@@ -4,22 +4,17 @@ import {createHash, randomUUID} from 'node:crypto';
 import {existsSync} from 'node:fs';
 import {lstat, mkdir, readdir, readFile, rm, writeFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
-import {builtinModules, createRequire} from 'node:module';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
 import {validateProjectDocument} from '../../studio-runtime/src/project-model.mjs';
 import {createPreviewPlayerHtml, createPreviewPlayerSource} from './preview-player-source.mjs';
 import {readLayerRegistry} from './layer-model.mjs';
+import {createBrowserDependencyPolicy, createProjectBoundaryPlugin} from './browser-dependencies.mjs';
+import {BROWSER_NOT_FOUND_MESSAGE, getBrowserExecutable} from './browser-executable.mjs';
 
 const repoRoot = path.resolve(fileURLToPath(new URL('../../../', import.meta.url)));
-const nodeModules = path.join(repoRoot, 'node_modules');
-const require = createRequire(import.meta.url);
-const browserDefaults = [
-  'C:/Program Files/Google/Chrome/Application/chrome.exe',
-  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-];
+let browserDependencies;
 const defaultParentOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173', 'https://vyvyd.pages.dev'];
 const normalizedParentOrigins = (origins) => {
   if (!Array.isArray(origins)) throw new TypeError('Preview parent origins must be an array.');
@@ -54,60 +49,28 @@ export class StudioPreviewError extends Error {
   }
 }
 
-const guardPlugin = (snapshotDirectory) => {
-  const allowedLoaders = new Set([
-    require.resolve('style-loader'), require.resolve('css-loader'),
-    path.join(path.dirname(require.resolve('@remotion/bundler')), 'esbuild-loader', 'index.js'),
-  ].map((filename) => path.resolve(filename)));
-  const nodeBuiltins = new Set(builtinModules.map((name) => name.replace(/^node:/, '')));
+const webpackFor = (snapshotDirectory) => (config) => {
+  const dependencies = browserDependencies ??= createBrowserDependencyPolicy();
   return {
-    apply(compiler) {
-      compiler.hooks.normalModuleFactory.tap('VyvydProjectBoundary', (factory) => {
-        factory.hooks.beforeResolve.tap('VyvydProjectBoundary', (data) => {
-          if (!data) return;
-          const parts = data.request.split('!');
-          // "-!" and "!!" are Webpack loader-control prefixes, not loaders.
-          for (const raw of parts.slice(0, -1).filter((part) => part && part !== '-')) {
-            const loader = raw.split('?', 1)[0];
-            const fromContext = createRequire(path.join(data.context || snapshotDirectory, '__studio_loader__.js'));
-            const resolved = path.isAbsolute(loader) ? path.resolve(loader) : fromContext.resolve(loader);
-            if (!allowedLoaders.has(resolved)) throw new Error('Project-defined Webpack loaders are not allowed.');
-          }
-          const request = parts.at(-1).split('?', 1)[0];
-          if (request.startsWith('node:') || nodeBuiltins.has(request)) {
-            throw new Error('Node.js host modules are not available inside a poster project.');
-          }
-        });
-        factory.hooks.afterResolve.tap('VyvydProjectBoundary', (data) => {
-          const resource = data?.createData?.resource?.split('?', 1)[0];
-          if (resource && !inside(snapshotDirectory, resource) && !inside(nodeModules, resource)) {
-            throw new Error('Imports must stay inside this project or installed browser dependencies.');
-          }
-        });
-      });
-    },
+    ...config,
+    entry: {bundle: config.entry, player: path.join(snapshotDirectory, 'preview-entry.tsx')},
+    output: {...config.output, filename: '[name].js'},
+    // Resolve dependency-local versions first, including Remotion's internal
+    // Zod4, then the companion's actual installed dependency locations.
+    resolve: {...config.resolve, modules: ['node_modules', ...dependencies.moduleDirectories]},
+    plugins: [...config.plugins, createProjectBoundaryPlugin(snapshotDirectory, dependencies)],
+    module: {...config.module, rules: config.module.rules.map((rule) => ({
+      ...rule,
+      use: Array.isArray(rule.use) ? rule.use.map((loader) => {
+        if (typeof loader === 'object' && loader.options?.remotionRoot) {
+          return {...loader, options: {...loader.options,
+            tsconfigRaw: {compilerOptions: {jsx: 'react-jsx', target: 'ES2020'}}}};
+        }
+        return loader;
+      }) : rule.use,
+    }))},
   };
 };
-
-const webpackFor = (snapshotDirectory) => (config) => ({
-  ...config,
-  entry: {bundle: config.entry, player: path.join(snapshotDirectory, 'preview-entry.tsx')},
-  output: {...config.output, filename: '[name].js'},
-  // Keep dependency-local package versions (Remotion uses Zod4 internally while
-  // vyvyd uses Zod3); the absolute fallback supports snapshot dirs outside the repo.
-  resolve: {...config.resolve, modules: ['node_modules', nodeModules]},
-  plugins: [...config.plugins, guardPlugin(snapshotDirectory)],
-  module: {...config.module, rules: config.module.rules.map((rule) => ({
-    ...rule,
-    use: Array.isArray(rule.use) ? rule.use.map((loader) => {
-      if (typeof loader === 'object' && loader.options?.remotionRoot) {
-        return {...loader, options: {...loader.options,
-          tsconfigRaw: {compilerOptions: {jsx: 'react-jsx', target: 'ES2020'}}}};
-      }
-      return loader;
-    }) : rule.use,
-  }))},
-});
 
 export const getPreviewValidationFrames = (duration, current = 0) => {
   if (!Number.isSafeInteger(duration) || duration < 1 || !Number.isFinite(current)) {
@@ -120,7 +83,7 @@ export const getPreviewValidationFrames = (duration, current = 0) => {
 };
 
 export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 'studio', 'previews'),
-  browserExecutable = process.env.CHROME_EXECUTABLE || browserDefaults.find(existsSync),
+  browserExecutable = getBrowserExecutable(),
   timeoutInMilliseconds = 30_000} = {}) {
   const root = path.resolve(dataDir);
   const versions = new Map();
@@ -224,7 +187,7 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
     if (!['http:', 'https:'].includes(parsedOrigin.protocol)) throw new TypeError('Preview origin must be HTTP or HTTPS.');
     const trustedParents = normalizedParentOrigins(parentOrigins);
     if (!Number.isFinite(frame)) throw new TypeError('Preview frame must be finite.');
-    if (!browserExecutable) throw new StudioPreviewError('Chrome 또는 Edge 설치 경로를 확인할 수 없습니다.');
+    if (!browserExecutable) throw new StudioPreviewError(BROWSER_NOT_FOUND_MESSAGE);
     await ensureRoot();
     const previewId = randomUUID();
     const directory = path.join(root, previewId);
@@ -311,6 +274,7 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
     }
     const output = path.join(record.directory, 'stills', `${frame}.png`);
     if (!existsSync(output)) {
+      if (!browserExecutable) throw new StudioPreviewError(BROWSER_NOT_FOUND_MESSAGE);
       const served = await validationServer();
       let browser;
       try {

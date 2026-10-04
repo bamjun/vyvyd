@@ -13,7 +13,7 @@ export function createStudioMcpServer({url = 'http://127.0.0.1:4180', fetchImpl 
     let response;
     try {
       response = await fetchImpl(new URL(pathname, service), {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Studio-MCP-Client': encodeURIComponent(server.server.getClientVersion()?.name ?? 'MCP client')}, body: JSON.stringify(args), signal: AbortSignal.timeout(180000)});
-    } catch {throw new Error('포스터 메이커 서비스에 연결할 수 없습니다. vyvyd에서 npm run studio:server를 실행해 주세요.');}
+    } catch {throw new Error('포스터 메이커 서비스에 연결할 수 없습니다. vyvyd-studio start 또는 npx @bamjun/vyvyd-studio@latest start를 실행해 주세요. 개발 저장소에서는 npm run studio:server를 사용할 수 있습니다.');}
     const result = await response.json();
     if (!response.ok) throw new Error(`${result.error?.code ?? response.status}: ${result.error?.message ?? '로컬 프로젝트 요청에 실패했습니다.'}`);
     return result;

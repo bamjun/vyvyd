@@ -1,20 +1,14 @@
 import {getVideoMetadata, makeCancelSignal, openBrowser, renderMedia, renderStill, selectComposition} from '@remotion/renderer';
-import {existsSync} from 'node:fs';
 import {open, stat} from 'node:fs/promises';
+import {BROWSER_NOT_FOUND_MESSAGE, getBrowserExecutable} from './browser-executable.mjs';
 
-const browsers = [
-  'C:/Program Files/Google/Chrome/Application/chrome.exe',
-  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-];
-
-export function renderExport({snapshot, options, output, browserExecutable = process.env.CHROME_EXECUTABLE || browsers.find(existsSync),
+export function renderExport({snapshot, options, output, browserExecutable = getBrowserExecutable(),
   onProgress = () => undefined, timeoutInMilliseconds = 30_000}) {
   const cancellation = makeCancelSignal();
   let cancelled = false;
   const cancel = () => {cancelled = true; cancellation.cancel();};
   const promise = (async () => {
-    if (!browserExecutable) throw new Error('Chrome 또는 Edge 설치 경로를 확인할 수 없습니다.');
+    if (!browserExecutable) throw new Error(BROWSER_NOT_FOUND_MESSAGE);
     let browser;
     try {
       browser = await openBrowser('chrome', {browserExecutable});

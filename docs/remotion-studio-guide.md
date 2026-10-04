@@ -1,5 +1,19 @@
 # 포스터 메이커 사용 안내
 
+## npm 패키지로 사용하기
+
+저장소 전체를 내려받지 않아도 Node.js 22.14 이상과 Chrome 또는 Edge가 있으면 사용할 수 있습니다.
+
+```sh
+npm install -g @bamjun/vyvyd-studio
+vyvyd-studio setup
+vyvyd-studio start
+```
+
+[배포 포스터 메이커](https://vyvyd.pages.dev/?studio=1)를 열고 로컬 네트워크 접근 권한을 허용합니다. Codex의 MCP 연결을 다시 시작한 뒤 현재 대화를 이어갑니다. 서비스 터미널은 사용하는 동안 켜 두세요. 명령 옵션·사용자 데이터 저장 위치·기존 개발 데이터 가져오기는 [패키지 사용 안내](../packages/studio-companion/README.md)에 설명합니다.
+
+이하 `npm run studio:*` 명령과 `.local/studio` 경로는 **개발 저장소에서 실행하는 방식**입니다. npm CLI의 기본 데이터 폴더와 구분하세요.
+
 포스터 메이커에서 프로젝트·이미지·레이어를 관리하고 PNG·GIF·MP4를 출력합니다. 새 디자인이나 애니메이션 코드는 현재 Codex 대화에서 요청합니다. `ad-mage`의 템플릿을 가져올 필요 없이 빈 프로젝트에서 시작할 수 있습니다.
 
 ## 설치와 실행

@@ -7,6 +7,8 @@
     "studio:server": "node packages/studio-companion/src/server.mjs",
     "studio:mcp": "node packages/studio-companion/src/mcp-server.mjs",
     "studio:setup": "node scripts/setup-studio-mcp.mjs",
+    "studio:package": "npm run build --prefix packages/studio-companion",
+    "studio:pack": "npm pack ./packages/studio-companion",
     "studio:proof:prepare": "node scripts/prepare-studio-proof.mjs",
     "studio:proof:server": "node scripts/studio-proof-server.mjs",
     "studio:proof:render": "node scripts/prepare-studio-proof.mjs && node scripts/studio-proof-render.mjs",

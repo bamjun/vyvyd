@@ -60,7 +60,17 @@
 
 출력은 시작할 때의 저장 버전을 사용하며 진행률·취소·같은 설정 재시도를 제공합니다. PNG·GIF는 이미지 도구로, MP4는 영상 도구로 이어 편집할 수 있습니다. 소스·이미지·레이어를 `.vyvyd.json` 파일로 보관하고 별도 프로젝트로 다시 가져올 수 있습니다.
 
-검증 환경은 Windows·Node.js 22.17.0·설치된 Chrome 또는 Edge입니다. 패키지 설치 후 별도 터미널에서 로컬 서비스와 앱을 각각 실행하세요.
+일반 사용자는 저장소를 내려받지 않고 npm 로컬 서비스를 설치해 배포 사이트에 연결할 수 있습니다. Node.js 22.14 이상과 Chrome 또는 Edge가 필요합니다.
+
+```bash
+npm install -g @bamjun/vyvyd-studio
+vyvyd-studio setup
+vyvyd-studio start
+```
+
+[배포 포스터 메이커](https://vyvyd.pages.dev/?studio=1)를 열고 브라우저의 로컬 네트워크 접근을 허용하세요. Codex의 MCP 연결을 다시 시작한 뒤 현재 대화에서 작업합니다. 설치된 CLI는 프로젝트를 사용자 데이터 폴더에 저장하며 npm 업데이트와 별개로 보관합니다. 설치·데이터 경로·옵션은 [npm 패키지 안내](packages/studio-companion/README.md)를 참고하세요.
+
+개발 저장소의 검증 환경은 Windows·Node.js 22.17.0·설치된 Chrome 또는 Edge입니다. 패키지 설치 후 별도 터미널에서 로컬 서비스와 앱을 각각 실행하세요.
 
 ```bash
 npm run studio:server
