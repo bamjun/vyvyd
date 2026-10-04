@@ -5,6 +5,8 @@ import {BlankPoster} from '../../../packages/studio-runtime/src/BlankPoster';
 import {validateProjectSettings, type ProjectDocument, type ProjectSettings} from '../../../packages/studio-runtime/src/project-model.mjs';
 import {studioApi, StudioApiError, type ProjectRuntimeStatus, type ProjectSummary} from './studioApi';
 import StudioSourcePreview from './StudioSourcePreview';
+import StudioLayersPanel from './StudioLayersPanel';
+import {readStudioLayerRegistry, getLayerReorderPatch, rebaseStudioLayerDraft, type LayerGeometry} from '../../../packages/studio-runtime/src/layer-editor.mjs';
 
 type Fields = {name: string; width: string; height: string; fps: string; seconds: string; backgroundColor: string};
 const initialFields: Fields = {name: '새 포스터', width: '1080', height: '1350', fps: '30', seconds: '3', backgroundColor: '#ffffff'};
@@ -68,6 +70,13 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
   const [sourcePreview, setSourcePreview] = useState<{projectId: string; revision: number; url: string} | null>(null);
   const [aiRequest, setAiRequest] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
+  const [layerDraft, setLayerDraft] = useState<Record<string, unknown>>({});
+  const [selectedLayer, setSelectedLayer] = useState<string | null>(null);
+  const [layerGeometry, setLayerGeometry] = useState<LayerGeometry[]>([]);
+  const [editMode, setEditMode] = useState(true);
+  const [layerNotice, setLayerNotice] = useState('');
+  const layerDraftRef = useRef(layerDraft);
+  layerDraftRef.current = layerDraft;
   const playerRef = useRef<PlayerRef>(null);
   const assetInput = useRef<HTMLInputElement>(null);
   const initialized = useRef(false);
@@ -78,21 +87,38 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
   const autoCompileKey = useRef('');
   projectRef.current = project;
   busyRef.current = busy;
-  const dirty = project !== null && JSON.stringify(fields) !== JSON.stringify(fieldsFor(project));
+  const dirty = project !== null && (JSON.stringify(fields) !== JSON.stringify(fieldsFor(project)) || JSON.stringify(layerDraft) !== JSON.stringify(project.edits.layers));
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
-  const previewDocument = remoteProject ?? project;
+  const previewDocument = project;
+  const registry = useMemo(() => {
+    try {return project ? readStudioLayerRegistry(project) : [];} catch {return [];}
+  }, [project]);
   const previewComposition = useMemo(() => {
     try {return project ? settingsFor(fields).composition : undefined;} catch {return project?.composition;}
   }, [project, fields]);
-  const previewEdits = useMemo(() => ({backgroundColor: fields.backgroundColor, layers: previewDocument?.edits.layers ?? {}}), [fields.backgroundColor, previewDocument?.edits.layers]);
+  const previewEdits = useMemo(() => ({backgroundColor: fields.backgroundColor, layers: layerDraft}), [fields.backgroundColor, layerDraft]);
+  const inspectorDisabled = busy || Boolean(remoteProject) || !connected;
+  const editingDisabled = inspectorDisabled || sourcePreview?.projectId !== project?.id || sourcePreview?.revision !== project?.revision;
 
   const acceptProject = useCallback((doc: ProjectDocument, preserveDraft = false) => {
     const sameProject = projectRef.current?.id === doc.id;
+    const previous = projectRef.current;
+    let nextLayers = structuredClone(doc.edits.layers);
+    if (preserveDraft && sameProject && previous) {
+      const rebased = rebaseStudioLayerDraft(previous.edits.layers, layerDraftRef.current, doc.edits.layers, readStudioLayerRegistry(doc), doc.assets);
+      nextLayers = rebased.layers;
+      setLayerNotice(rebased.discarded.length ? `새 소스에서 지원하지 않는 편집은 제외했습니다: ${rebased.discarded.join(', ')}. 나머지 변경을 확인하고 저장하세요.` : '');
+      const oldFields = fieldsFor(previous);
+      setFields((draft) => Object.fromEntries(Object.entries(fieldsFor(doc)).map(([key, value]) => [key, draft[key as keyof Fields] !== oldFields[key as keyof Fields] ? draft[key as keyof Fields] : value])) as Fields);
+    } else {setFields(fieldsFor(doc)); setLayerNotice('');}
+    layerDraftRef.current = nextLayers; setLayerDraft(nextLayers);
     projectRef.current = doc;
-    setProject(doc); setRemoteProject(null); if (!preserveDraft) setFields(fieldsFor(doc)); setCreating(false);
+    setProject(doc); setRemoteProject(null); setCreating(false);
+    const nextRegistry = readStudioLayerRegistry(doc);
+    setSelectedLayer((id) => sameProject && nextRegistry.some((layer) => layer.id === id) ? id : null);
     setSelectedAsset((previous) => sameProject && doc.assets.some((asset) => asset.id === previous) ? previous : null);
-    if (!sameProject) {setRuntimeStatus(null); setSourcePreview(null); autoCompileKey.current = '';}
+    if (!sameProject) {setRuntimeStatus(null); setSourcePreview(null); setLayerGeometry([]); autoCompileKey.current = '';}
     setFrame(Math.max(0, Math.min(Number(frames.current[doc.id]) || 0, doc.composition.durationInFrames - 1)));
     store(selectedKey, doc.id);
     setProjects((previous) => [{id: doc.id, name: doc.name, revision: doc.revision, updatedAt: doc.updatedAt, composition: doc.composition, assetCount: doc.assets.length}, ...previous.filter((entry) => entry.id !== doc.id)]);
@@ -101,6 +127,7 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
   const acceptRuntimeStatus = useCallback((id: string, next: ProjectRuntimeStatus) => {
     if (projectRef.current?.id !== id || next.revision < projectRef.current.revision) return;
     setRuntimeStatus(next);
+    if (dirtyRef.current && next.revision > projectRef.current.revision) return;
     const compiled = next.compile;
     if (compiled.previewUrl && Number.isSafeInteger(compiled.revision) && Number(compiled.revision) >= 1) {
       setSourcePreview((previous) => previous?.projectId === id && (previous.revision > Number(compiled.revision)
@@ -117,6 +144,27 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
     if (persist) store(frameKey, JSON.stringify(frames.current));
   }, []);
   const reportPreviewError = useCallback((message: string) => setError(`소스 미리보기 오류: ${message}`), []);
+  const selectLayer = useCallback((id: string | null) => {setSelectedLayer(id); if (id) setEditMode(true);}, []);
+  const changeLayer = useCallback((id: string, patch: Record<string, unknown | null>) => {
+    const doc = projectRef.current;
+    if (!doc) return;
+    const definition = readStudioLayerRegistry(doc).find((layer) => layer.id === id);
+    if (!definition) return;
+    const next = {...layerDraftRef.current};
+    const values = {...(next[id] as Record<string, unknown> | undefined)};
+    for (const [key, value] of Object.entries(patch)) {
+      if (!definition.editable.includes(key as typeof definition.editable[number])) continue;
+      if (value === null) delete values[key]; else values[key] = value;
+    }
+    if (Object.keys(values).length) next[id] = values; else delete next[id];
+    layerDraftRef.current = next; setLayerDraft(next); setEditMode(true); setCopyStatus('');
+  }, []);
+  const reorderLayer = (direction: 'up' | 'down') => {
+    const patch = getLayerReorderPatch(registry, layerDraft, layerGeometry, selectedLayer, direction);
+    if (!patch) return;
+    for (const [id, values] of Object.entries(patch)) changeLayer(id, values);
+  };
+  const measureLayers = useCallback((measured: LayerGeometry[]) => setLayerGeometry(measured), []);
 
   const connect = useCallback(async (restore = false) => {
     setBusy(true); setError('');
@@ -224,7 +272,7 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
     if (!project) return null;
     if (remoteProject) throw new Error('최신 저장본을 다시 읽거나 내 입력을 최신 버전에 적용한 뒤 저장하세요.');
     const settings = settingsFor(fields);
-    const saved = await studioApi.save({...project, name: settings.name, composition: settings.composition, edits: {...project.edits, backgroundColor: fields.backgroundColor}}, project.revision);
+    const saved = await studioApi.save({...project, name: settings.name, composition: settings.composition, edits: {backgroundColor: fields.backgroundColor, layers: layerDraftRef.current}}, project.revision);
     acceptProject(saved); setStatus('프로젝트를 저장했습니다.');
     return saved;
   };
@@ -263,10 +311,11 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
     `프로젝트 ID: ${previewDocument.id}`,
     `저장된 수정 번호: ${previewDocument.revision}`,
     `프로젝트 이름: ${previewDocument.name}`,
+    selectedLayer ? `선택한 레이어 ID: ${selectedLayer}` : '',
     aiRequest.trim() ? `요청: ${aiRequest.trim()}` : '요청: 이 프로젝트의 Remotion 소스를 작성하거나 수정해 주세요.',
     '먼저 연결된 vyvyd MCP에서 프로젝트와 소스, 파일 목록, 편집 값을 읽어 현재 상태를 확인해 주세요.',
     '프로젝트의 source를 수정하고 expectedRevision을 확인해 적용해 주세요. 기존 직접 편집 값과 업로드한 파일은 유지해 주세요.',
-    dirty ? '브라우저에 미저장 설정이 있으므로 저장본과 구분해 작업해 주세요.' : '',
+    dirty ? '브라우저에 미저장 설정·레이어 편집이 있으므로 저장본과 구분해 작업해 주세요.' : '',
   ].filter(Boolean).join('\n') : '';
   const copyRequest = async () => {
     try {await navigator.clipboard.writeText(requestText); setCopyStatus('복사했습니다. 현재 Codex 대화에 붙여넣어 요청하세요.');}
@@ -296,11 +345,18 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
       {creating ? <div className="rounded-xl border border-white/10 p-5"><div className="mb-4 flex items-center justify-between"><h3 className="font-semibold text-white">빈 프로젝트 만들기</h3><button className={buttonClass} disabled={busy} onClick={() => setCreating(false)}><ArrowLeft size={14} />돌아가기</button></div><SettingsFields fields={newFields} onChange={setNewFields} disabled={busy} creating /><p className="mt-3 text-xs text-gray-500">디자인이 없는 빈 캔버스로 시작합니다. 길이는 FPS에 맞는 프레임 수로 저장됩니다.</p><button className={`${primaryClass} mt-5`} disabled={busy || !connected} onClick={() => void createProject()}>{busy ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}프로젝트 만들기</button></div>
       : project && previewComposition ? <div className="min-w-0 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-lg font-semibold text-white">{project.name}</h3><p className="mt-1 text-xs text-gray-500">{dirty ? `미저장 변경 있음 · 기준 버전 ${project.revision}` : `저장됨 · 버전 ${project.revision}`}</p><p className="mt-1 select-all break-all font-mono text-[11px] text-gray-500">프로젝트 ID: {project.id}</p></div><div className="flex gap-2"><button className={buttonClass} disabled={busy} onClick={() => void openProject(project.id)}><FolderOpen size={14} />저장본 다시 열기</button><button className={primaryClass} disabled={busy || !connected || !dirty || Boolean(remoteProject)} onClick={() => void save()}><Save size={14} />저장</button></div></div>
-        {remoteProject && <div role="alert" className="rounded-xl border border-amber-400/25 bg-amber-400/5 p-4 text-sm text-amber-200"><p>저장본이 버전 {remoteProject.revision}로 변경되었습니다. 현재 입력을 유지했고 자동으로 덮어쓰지 않았습니다.</p><p className="mt-1 text-xs text-gray-400">최신 소스 미리보기와 파일 목록을 확인한 뒤, 저장본을 다시 읽거나 내 설정을 최신 버전에 적용하세요.</p><div className="mt-3 flex flex-wrap gap-2"><button className={buttonClass} disabled={busy} onClick={() => void openProject(project.id)}>최신 저장본 다시 읽기</button><button className={buttonClass} disabled={busy} onClick={() => {acceptProject(remoteProject, true); setStatus('최신 소스에 내 입력을 유지했습니다. 확인 후 저장하세요.'); setError('');}}>내 입력 유지하고 최신 버전 사용</button></div></div>}
+        {remoteProject && <div role="alert" className="rounded-xl border border-amber-400/25 bg-amber-400/5 p-4 text-sm text-amber-200"><p>저장본이 버전 {remoteProject.revision}로 변경되었습니다. 현재 입력을 유지했고 자동으로 덮어쓰지 않았습니다.</p><p className="mt-1 text-xs text-gray-400">현재 미리보기를 유지했습니다. 최신 저장본을 다시 읽거나, 변경한 입력만 최신 버전에 적용한 뒤 확인하세요.</p><div className="mt-3 flex flex-wrap gap-2"><button className={buttonClass} disabled={busy} onClick={() => void openProject(project.id)}>최신 저장본 다시 읽기</button><button className={buttonClass} disabled={busy} onClick={() => {acceptProject(remoteProject, true); setStatus('최신 소스에 내 입력을 유지했습니다. 확인 후 저장하세요.'); setError('');}}>내 입력 유지하고 최신 버전 사용</button></div></div>}
         <div className="rounded-xl border border-white/10 bg-black/15 p-4" aria-label="Codex 연결과 소스 상태"><div className="flex flex-wrap items-start justify-between gap-3"><div className="space-y-1.5 text-xs"><p className={mcpRecent ? 'text-green-300' : 'text-gray-400'}>{mcpRecent ? 'MCP 최근 연결' : Number.isFinite(lastMcpSeen) ? 'MCP 최근 사용 없음' : 'MCP 연결 대기'}{runtimeStatus?.mcp.clientName && ` · ${runtimeStatus.mcp.clientName}`}</p>{Number.isFinite(lastMcpSeen) && <p className="text-gray-500">최근 연결 확인: {new Date(lastMcpSeen).toLocaleString('ko-KR')}</p>}{Number.isFinite(lastMcpTool) ? <p className="text-gray-500">마지막 도구 호출: {new Date(lastMcpTool).toLocaleString('ko-KR')}</p> : <p className="text-gray-500">MCP 도구 호출 대기</p>}<p className={runtimeStatus?.compile.state === 'failed' ? 'text-amber-200' : 'text-purple-200'}>{runtimeStatus ? compileLabels[runtimeStatus.compile.state] : '소스 상태 확인 중…'}{sourcePreview && ` · 표시 버전 ${sourcePreview.revision}`}</p><p className="text-gray-500">로컬 서비스 연결과 MCP 도구 사용 상태를 따로 확인합니다.</p></div><button className={buttonClass} disabled={busy || !connected || runtimeStatus?.compile.state === 'compiling'} onClick={() => void compile()}><RefreshCw size={14} className={runtimeStatus?.compile.state === 'compiling' ? 'animate-spin' : ''} />소스 다시 컴파일</button></div>{runtimeStatus?.compile.state === 'failed' && <pre role="alert" className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-black/25 p-3 text-xs text-amber-200">{runtimeStatus.compile.message || '소스를 컴파일하지 못했습니다.'}{sourcePreview ? '\n마지막 정상 소스 미리보기를 유지했습니다.' : '\n빈 캔버스 미리보기를 유지했습니다.'}</pre>}</div>
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_230px]">
-          <div className="min-w-0"><div className="flex min-h-64 items-center justify-center overflow-hidden rounded-xl border border-white/10 bg-[#0a0b10] p-4" data-testid="studio-canvas">{sourcePreview?.projectId === project.id && previewDocument ? <StudioSourcePreview projectId={project.id} revision={sourcePreview.revision} previewUrl={sourcePreview.url} composition={previewComposition} edits={previewEdits} frame={frame} isActive={isActive} onFrame={updateSourceFrame} onError={reportPreviewError} /> : <Player key={`${project.id}-${previewComposition.width}-${previewComposition.height}-${previewComposition.fps}-${previewComposition.durationInFrames}`} ref={playerRef} component={BlankPoster} inputProps={{backgroundColor: fields.backgroundColor, composition: previewComposition}} durationInFrames={previewComposition.durationInFrames} fps={previewComposition.fps} compositionWidth={previewComposition.width} compositionHeight={previewComposition.height} initialFrame={Math.min(frame, previewComposition.durationInFrames - 1)} controls loop spaceKeyToPlayOrPause={isActive} style={{width: '100%', maxWidth: Math.min(560, 520 * previewComposition.width / previewComposition.height), aspectRatio: `${previewComposition.width}/${previewComposition.height}`}} errorFallback={({error: cause}) => <p className="p-4 text-sm text-amber-200">미리보기 오류: {cause.message}</p>} />}</div><div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500"><span>{previewComposition.width} × {previewComposition.height} · {previewComposition.fps} FPS · {(previewComposition.durationInFrames / previewComposition.fps).toFixed(2)}초{dirty ? ' · 미저장 설정 반영' : ''}</span><span>프레임 {frame} / {previewComposition.durationInFrames - 1}</span></div></div>
-          <aside className="rounded-xl border border-white/10 bg-black/15 p-4" aria-label="프로젝트 설정"><h4 className="mb-3 text-sm font-semibold text-white">프로젝트 설정</h4><SettingsFields fields={fields} onChange={setFields} disabled={busy} /><p className="mt-3 text-xs leading-relaxed text-gray-500">설정을 바꾼 뒤 저장하세요. 이미지 파일은 추가 즉시 보관됩니다.</p></aside>
+        {layerNotice && <p role="status" className="rounded-lg border border-amber-400/20 p-3 text-xs text-amber-200">{layerNotice}</p>}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/15 p-3">
+          <div className="flex gap-2"><button className={editMode ? primaryClass : buttonClass} aria-pressed={editMode} onClick={() => setEditMode(true)}>레이어 편집</button><button className={!editMode ? primaryClass : buttonClass} aria-pressed={!editMode} onClick={() => setEditMode(false)}>재생 보기</button></div>
+          {sourcePreview && <label className="flex items-center gap-2 text-xs text-gray-400">프레임<input aria-label="편집 프레임" type="range" min={0} max={previewComposition.durationInFrames - 1} value={Math.min(frame, previewComposition.durationInFrames - 1)} disabled={!editMode || busy} onChange={(event) => updateSourceFrame(Number(event.target.value), true)} className="w-32 accent-purple-400" /><span className="tabular-nums">{frame}</span></label>}
+          <p className="w-full text-xs text-gray-500">편집 모드에서 레이어를 선택하고 드래그하세요. 방향키 1px · Shift+방향키 10px. 변경 후 저장하면 Codex와 공유됩니다.</p>
+          {registry.length > 0 && editingDisabled && !busy && <p className="text-xs text-amber-200">{remoteProject ? '외부 변경을 확인한 뒤 편집을 이어가세요.' : '저장한 버전의 소스 미리보기를 준비한 뒤 직접 편집할 수 있습니다.'}</p>}
+        </div>
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_270px]">
+          <div className="min-w-0"><div className="flex min-h-64 items-center justify-center overflow-hidden rounded-xl border border-white/10 bg-[#0a0b10] p-4" data-testid="studio-canvas">{sourcePreview?.projectId === project.id && previewDocument ? <StudioSourcePreview projectId={project.id} revision={sourcePreview.revision} previewUrl={sourcePreview.url} composition={previewComposition} edits={previewEdits} frame={frame} isActive={isActive} onFrame={updateSourceFrame} onError={reportPreviewError} registry={registry} selectedLayerId={selectedLayer} editMode={editMode} editingDisabled={editingDisabled} onSelectLayer={selectLayer} onChangeLayer={changeLayer} onMeasured={measureLayers} /> : <Player key={`${project.id}-${previewComposition.width}-${previewComposition.height}-${previewComposition.fps}-${previewComposition.durationInFrames}`} ref={playerRef} component={BlankPoster} inputProps={{backgroundColor: fields.backgroundColor, composition: previewComposition}} durationInFrames={previewComposition.durationInFrames} fps={previewComposition.fps} compositionWidth={previewComposition.width} compositionHeight={previewComposition.height} initialFrame={Math.min(frame, previewComposition.durationInFrames - 1)} controls loop spaceKeyToPlayOrPause={isActive} style={{width: '100%', maxWidth: Math.min(560, 520 * previewComposition.width / previewComposition.height), aspectRatio: `${previewComposition.width}/${previewComposition.height}`}} errorFallback={({error: cause}) => <p className="p-4 text-sm text-amber-200">미리보기 오류: {cause.message}</p>} />}</div><div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500"><span>{previewComposition.width} × {previewComposition.height} · {previewComposition.fps} FPS · {(previewComposition.durationInFrames / previewComposition.fps).toFixed(2)}초{dirty ? ' · 미저장 변경 반영' : ''}</span><span>프레임 {frame} / {previewComposition.durationInFrames - 1}</span></div></div>
+          <div className="space-y-4"><StudioLayersPanel key={`${project.id}-${project.revision}`} registry={registry} edits={layerDraft} assets={project.assets} selectedId={selectedLayer} onSelect={selectLayer} onChange={changeLayer} disabled={inspectorDisabled} measured={editingDisabled ? [] : layerGeometry} onReorder={reorderLayer} /><aside className="rounded-xl border border-white/10 bg-black/15 p-4" aria-label="프로젝트 설정"><details><summary className="cursor-pointer text-sm font-semibold text-white">프로젝트 설정</summary><div className="mt-4"><SettingsFields fields={fields} onChange={setFields} disabled={busy} /><p className="mt-3 text-xs leading-relaxed text-gray-500">설정·레이어 변경은 저장으로 반영합니다. 이미지 파일은 추가 즉시 보관됩니다.</p></div></details></aside></div>
         </div>
         <div className="rounded-xl border border-white/10 p-4" aria-label="프로젝트 파일"><div className="flex flex-wrap items-center justify-between gap-3"><h4 className="text-sm font-semibold text-white">파일 <span className="text-gray-500">{previewDocument!.assets.length}</span></h4><button className={buttonClass} disabled={busy || !connected || Boolean(remoteProject)} onClick={() => assetInput.current?.click()}><ImagePlus size={15} />이미지 추가</button><input ref={assetInput} type="file" aria-label="프로젝트 이미지 파일" accept="image/png,image/jpeg,image/webp,image/gif" multiple className="sr-only" onChange={(event) => void addAssets(Array.from(event.target.files ?? []))} /></div><p className="mt-2 text-xs text-gray-500">PNG · JPG · WebP · GIF, 파일당 20 MB 이하. 추가한 파일은 프로젝트에 보관됩니다.</p>{previewDocument!.assets.length === 0 ? <p className="py-8 text-center text-sm text-gray-500">이미지나 로고를 추가하세요.</p> : <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">{previewDocument!.assets.map((entry) => <button key={entry.id} aria-label={`파일 보기: ${entry.name}`} className={`overflow-hidden rounded-lg border text-left ${selectedAsset === entry.id ? 'border-purple-400' : 'border-white/10 hover:border-white/25'}`} onClick={() => setSelectedAsset(entry.id)}><img src={studioApi.assetUrl(project.id, entry.id)} alt={entry.name} className="h-24 w-full bg-[#121318] object-contain" /><span className="block truncate px-2 pt-2 text-xs text-gray-300">{entry.name}</span><span className="block px-2 pb-2 pt-1 text-[11px] text-gray-500">{(entry.size / 1024).toFixed(1)} KB</span></button>)}</div>}{asset && <div className="mt-4 rounded-lg bg-black/15 p-3"><p className="mb-3 text-xs text-gray-400">파일 미리보기 · {asset.name}</p><img src={studioApi.assetUrl(project.id, asset.id)} alt={`파일 미리보기: ${asset.name}`} className="max-h-72 w-full object-contain" /></div>}</div>
         <div className="rounded-xl border border-purple-400/20 bg-purple-500/5 p-4" aria-label="현재 Codex에 작업 요청"><h4 className="text-sm font-semibold text-purple-100">현재 Codex에 작업 요청</h4><p className="mt-2 text-xs leading-relaxed text-gray-400">원하는 작업을 적고 요청 문구를 복사해 현재 대화에 붙여넣으세요. Codex의 소스 수정은 이 미리보기에 자동 반영됩니다.</p><label className="mt-3 block text-xs text-gray-400">원하는 작업<textarea aria-label="Codex에 요청할 작업" value={aiRequest} onChange={(event) => {setAiRequest(event.target.value); setCopyStatus('');}} placeholder="예: 추가한 이미지를 사용하고 제목에 자연스러운 등장 애니메이션을 넣어 주세요." className={`${inputClass} min-h-24`} /></label><button type="button" className={`${primaryClass} mt-3`} onClick={() => void copyRequest()}><Copy size={14} />프로젝트 요청 문구 복사</button>{copyStatus && <p role="status" className="mt-2 text-xs text-purple-200">{copyStatus}</p>}<details className="mt-3 text-xs text-gray-400"><summary className="cursor-pointer">복사 내용 보기</summary><textarea readOnly aria-label="Codex 요청 복사 내용" value={requestText} onFocus={(event) => event.target.select()} className={`${inputClass} min-h-48 font-mono text-xs`} /></details></div>

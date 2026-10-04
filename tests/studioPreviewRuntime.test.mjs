@@ -83,14 +83,14 @@ test('restart restore matches source and all editable props rather than revision
   const root = await temporary(t);
   const project = createProjectDocument({name: 'Restore preview',
     composition: {width: 160, height: 90, fps: 30, durationInFrames: 4}});
-  const save = async (document, createdAt) => {
+  const save = async (document, createdAt, previewProtocolVersion = 4) => {
     const previewId = randomUUID();
     const directory = path.join(root, previewId);
     await mkdir(path.join(directory, 'render'), {recursive: true});
     await writeFile(path.join(directory, 'player.html'), '<html>ready</html>');
     await writeFile(path.join(directory, 'render', 'player.js'), '/* ready */');
     await writeFile(path.join(directory, 'preview.json'), JSON.stringify({previewId,
-      state: 'ready', projectId: document.id, revision: document.revision, createdAt,
+      state: 'ready', previewProtocolVersion, projectId: document.id, revision: document.revision, createdAt,
       sourceHash: createHash('sha256').update(JSON.stringify(document.source)).digest('hex'),
       inputProps: {composition: document.composition, backgroundColor: document.edits.backgroundColor,
         layers: document.edits.layers, assets: document.assets, assetUrls: {}},
@@ -99,6 +99,7 @@ test('restart restore matches source and all editable props rather than revision
   };
   await save(project, '2026-10-01T01:00:00.000Z');
   const newestMatching = await save(project, '2026-10-01T02:00:00.000Z');
+  await save(project, '2026-10-01T05:00:00.000Z', 3);
   const wrongSource = structuredClone(project);
   wrongSource.source.files['src/Root.tsx'] += '\n// unsaved draft';
   await save(wrongSource, '2026-10-01T03:00:00.000Z');

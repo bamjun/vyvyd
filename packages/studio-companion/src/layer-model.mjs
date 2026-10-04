@@ -55,9 +55,13 @@ export function applyLayerEdits(project, patch = {}) {
     if (!plain(values)) fail('레이어별 편집 값은 JSON 객체여야 합니다.');
     const edited = {...layers[id]};
     for (const [key, value] of Object.entries(values)) {
+      if (value === null) {
+        if (!properties.has(key)) fail(`지원하지 않는 편집 속성: ${key}`);
+        delete edited[key];
+        continue;
+      }
       if (!layer.editable.includes(key)) fail(`${id} 레이어는 ${key} 편집을 지원하지 않습니다.`);
-      if (value === null) delete edited[key];
-      else {validateValue(key, value, project.assets); edited[key] = value;}
+      validateValue(key, value, project.assets); edited[key] = value;
     }
     layers[id] = edited;
   }
