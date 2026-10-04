@@ -146,6 +146,34 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         else throw error('METHOD_NOT_ALLOWED', '지원하지 않는 요청 방식입니다.', 405);
         return;
       }
+      const historyRoute = /^\/projects\/([^/]+)\/history$/.exec(pathname);
+      if (historyRoute) {
+        if (request.method !== 'GET') throw error('METHOD_NOT_ALLOWED', '수정 이력은 GET으로 읽을 수 있습니다.', 405);
+        json(response, 200, await store.listHistory(historyRoute[1]));
+        return;
+      }
+      const historyVersionRoute = /^\/projects\/([^/]+)\/history\/([^/]+)$/.exec(pathname);
+      if (historyVersionRoute) {
+        if (request.method !== 'GET') throw error('METHOD_NOT_ALLOWED', '수정 이력은 GET으로 읽을 수 있습니다.', 405);
+        if (!/^[1-9]\d*$/.test(historyVersionRoute[2])) throw error('INVALID_REVISION', '올바른 수정 번호가 필요합니다.');
+        json(response, 200, await store.readHistory(historyVersionRoute[1], Number(historyVersionRoute[2])));
+        return;
+      }
+      const requestRoute = /^\/projects\/([^/]+)\/requests\/([^/]+)$/.exec(pathname);
+      if (requestRoute) {
+        if (request.method !== 'GET') throw error('METHOD_NOT_ALLOWED', '요청 기록은 GET으로 읽을 수 있습니다.', 405);
+        const receipt = await store.getRequest(requestRoute[1], requestRoute[2]);
+        if (!receipt) throw error('REQUEST_NOT_FOUND', '반영된 요청 기록을 찾을 수 없습니다.', 404);
+        json(response, 200, {projectId: requestRoute[1].toLowerCase(), requestId: receipt.requestId,
+          appliedRevision: receipt.revision, kind: receipt.kind});
+        return;
+      }
+      const restoreRoute = /^\/projects\/([^/]+)\/restore$/.exec(pathname);
+      if (restoreRoute) {
+        if (request.method !== 'POST') throw error('METHOD_NOT_ALLOWED', '버전 복원은 POST를 사용합니다.', 405);
+        json(response, 200, await controller.restoreVersion(restoreRoute[1], await readJson(request)));
+        return;
+      }
       const statusRoute = /^\/projects\/([^/]+)\/status$/.exec(pathname);
       if (statusRoute && request.method === 'GET') {
         json(response, 200, await controller.status(statusRoute[1]));

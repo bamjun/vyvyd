@@ -21,10 +21,13 @@ type Props = {
   onSelectLayer: (id: string | null) => void;
   onChangeLayer: (id: string, patch: Record<string, unknown | null>) => void;
   onMeasured: (layers: LayerGeometry[]) => void;
+  onBeginInteraction?: () => void;
+  onEndInteraction?: () => void;
+  onRegisterCancelInteraction?: (cancel: (() => void) | null) => void;
 };
 
 /** The companion renders authored code in its own document; this UI only exchanges typed preview state. */
-export default function StudioSourcePreview({projectId, revision, previewUrl, composition, edits, frame, isActive, onFrame, onError, registry, selectedLayerId, editMode, editingDisabled, onSelectLayer, onChangeLayer, onMeasured}: Props) {
+export default function StudioSourcePreview({projectId, revision, previewUrl, composition, edits, frame, isActive, onFrame, onError, registry, selectedLayerId, editMode, editingDisabled, onSelectLayer, onChangeLayer, onMeasured, onBeginInteraction, onEndInteraction, onRegisterCancelInteraction}: Props) {
   const iframe = useRef<HTMLIFrameElement>(null);
   const currentFrame = useRef(frame);
   currentFrame.current = frame;
@@ -131,7 +134,7 @@ export default function StudioSourcePreview({projectId, revision, previewUrl, co
     <div className="relative overflow-hidden" style={{aspectRatio: `${composition.width}/${composition.height}`}}>
       {safeUrl && <iframe ref={iframe} src={safeUrl} title="Remotion 프로젝트 미리보기" data-testid="studio-source-preview" className="absolute inset-0 h-full w-full border-0" sandbox="allow-scripts" onLoad={() => send('sync')} allow="autoplay; fullscreen" />}
       {!ready && !failure && <p className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#0a0b10]/80 p-4 text-center text-xs text-gray-400">소스 미리보기를 연결하고 있습니다…</p>}
-      {ready && editMode && !failure && <StudioLayerOverlay key={`${projectId}-${revision}`} registry={registry} edits={edits.layers} geometry={geometry} geometryReady={geometryStamp?.token === syncToken && geometryStamp.frame === frame} composition={composition} selectedId={selectedLayerId} disabled={editingDisabled || !isActive} onSelect={onSelectLayer} onChange={onChangeLayer} />}
+      {ready && editMode && !failure && <StudioLayerOverlay key={`${projectId}-${revision}`} registry={registry} edits={edits.layers} geometry={geometry} geometryReady={geometryStamp?.token === syncToken && geometryStamp.frame === frame} composition={composition} selectedId={selectedLayerId} disabled={editingDisabled || !isActive} onSelect={onSelectLayer} onChange={onChangeLayer} onBeginInteraction={onBeginInteraction} onEndInteraction={onEndInteraction} onRegisterCancelInteraction={onRegisterCancelInteraction} />}
     </div>
     {failure && <p role="alert" className="mt-2 whitespace-pre-wrap text-xs text-amber-200">{failure}</p>}
     {editMode && geometry.some((layer) => layer.id === selectedLayerId) && <p className="mt-2 text-[11px] text-gray-500">현재 프레임 표시 위치 {geometry.find((layer) => layer.id === selectedLayerId)!.x.toFixed(1)}, {geometry.find((layer) => layer.id === selectedLayerId)!.y.toFixed(1)} px · 이동은 레이어의 기준 위치에 적용됩니다.</p>}

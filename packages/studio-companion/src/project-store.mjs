@@ -1,9 +1,9 @@
-import {randomUUID} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import {lstat, mkdir, open, readFile, readdir, rename, rm, unlink} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
-import {createProjectDocument, validateProjectDocument} from '../../studio-runtime/src/project-model.mjs';
+import {createProjectDocument, validateProjectDocument, validateProjectSettings} from '../../studio-runtime/src/project-model.mjs';
 
 export const MAX_ASSET_BYTES = 20 * 1024 * 1024;
 export const MAX_PROJECT_ASSETS = 100;
@@ -66,7 +66,40 @@ const replayed = (receipts, identity) => {
 const appendedReceipts = (receipts, identity, revision) => identity
   ? [...receipts, {...identity, revision}].slice(-MAX_REQUEST_RECEIPTS)
   : receipts;
-const storedJson = (document, receipts) => `${JSON.stringify({...document, _studioRequests: receipts}, null, 2)}\n`;
+const historySummary = (document) => ({revision: document.revision, name: document.name, updatedAt: document.updatedAt,
+  composition: {...document.composition}, assetCount: document.assets.length});
+const validateHistory = (history, document) => {
+  // Existing Stage 1–3 projects get their current baseline on their next commit.
+  if (history === undefined) return [];
+  if (!Array.isArray(history) || history.length === 0) fail('INVALID_STORED_PROJECT', '저장된 수정 이력을 읽을 수 없습니다.', 500);
+  let previousRevision = 0;
+  const validated = history.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || Object.keys(item).length !== 7
+      || !Object.keys(item).every((key) => ['revision', 'name', 'updatedAt', 'composition', 'assetCount', 'file', 'sha256'].includes(key))
+      || !Number.isSafeInteger(item.revision) || item.revision <= previousRevision || item.revision > document.revision
+      || !Number.isSafeInteger(item.assetCount) || item.assetCount < 0 || item.assetCount > MAX_PROJECT_ASSETS
+      || typeof item.updatedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(item.updatedAt)
+      || !Number.isFinite(Date.parse(item.updatedAt)) || new Date(item.updatedAt).toISOString() !== item.updatedAt
+      || typeof item.file !== 'string' || !new RegExp(`^history/${item.revision}-[0-9a-f-]{36}\\.json$`).test(item.file)
+      || !UUID.test(item.file.slice(item.file.indexOf('-') + 1, -5))
+      || typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.sha256)) {
+      fail('INVALID_STORED_PROJECT', '저장된 수정 이력을 읽을 수 없습니다.', 500);
+    }
+    let settings;
+    try {settings = validateProjectSettings({name: item.name, composition: item.composition});} catch {
+      fail('INVALID_STORED_PROJECT', '저장된 수정 이력을 읽을 수 없습니다.', 500);
+    }
+    previousRevision = item.revision;
+    return {...item, name: settings.name, composition: settings.composition};
+  });
+  const latest = validated.at(-1);
+  const {file, sha256, ...latestSummary} = latest;
+  void file; void sha256;
+  if (!isDeepStrictEqual(latestSummary, historySummary(document))) fail('INVALID_STORED_PROJECT', '현재 프로젝트와 수정 이력이 다릅니다.', 500);
+  return validated;
+};
+const storedJson = (document, receipts, history) => `${JSON.stringify({...document, _studioRequests: receipts, _studioHistory: history}, null, 2)}\n`;
 const validate = (value) => {
   try {return validateProjectDocument(value);} catch (error) {fail('INVALID_PROJECT', error.message);}
 };
@@ -158,10 +191,10 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
       const target = await projectFile(directory, 'project.json');
       const stored = JSON.parse(await readFile(target, 'utf8'));
       if (!stored || typeof stored !== 'object' || Array.isArray(stored)) fail('INVALID_STORED_PROJECT', '저장된 프로젝트 문서를 읽을 수 없습니다.', 500);
-      const {_studioRequests, ...publicDocument} = stored;
+      const {_studioRequests, _studioHistory, ...publicDocument} = stored;
       const document = validate(publicDocument);
       if (document.id !== id) fail('INVALID_STORED_PROJECT', '저장된 프로젝트 ID가 폴더와 다릅니다.', 500);
-      return {document, receipts: validateReceipts(_studioRequests, document.revision)};
+      return {document, receipts: validateReceipts(_studioRequests, document.revision), history: validateHistory(_studioHistory, document)};
     } catch (error) {
       if (isMissing(error)) fail('PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.', 404);
       if (error instanceof StudioStoreError && error.code !== 'INVALID_PROJECT') throw error;
@@ -188,14 +221,27 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
     }
   };
 
-  const persist = async (document, previous, receipts = []) => {
+  const writeHistory = async (directory, document) => {
+    const contents = `${JSON.stringify(document, null, 2)}\n`;
+    const file = `history/${document.revision}-${randomUUID()}.json`;
+    const target = await projectFile(directory, file, true);
+    const handle = await open(target, 'wx', 0o600);
+    try {await handle.writeFile(contents); await handle.sync();} finally {await handle.close();}
+    return {...historySummary(document), file, sha256: createHash('sha256').update(contents).digest('hex')};
+  };
+
+  const persist = async (document, previous, receipts = [], history = [], sourcesChanged = true) => {
     const directory = await projectDirectory(document.id);
     try {
-      await writeSources(directory, document, previous);
-      // The canonical document and replay receipt are committed by the same rename.
-      await writeAtomic(directory, 'project.json', storedJson(document, receipts));
+      const nextHistory = [...history];
+      if (previous && !nextHistory.some((entry) => entry.revision === previous.revision)) nextHistory.push(await writeHistory(directory, previous));
+      nextHistory.push(await writeHistory(directory, document));
+      if (sourcesChanged) await writeSources(directory, document, previous);
+      // Only versions referenced by this same canonical rename are committed history.
+      // A crash before the rename can leave an unreferenced immutable file, never a false version.
+      await writeAtomic(directory, 'project.json', storedJson(document, receipts, nextHistory));
     } catch (error) {
-      if (previous) await writeSources(directory, previous, document).catch(() => undefined);
+      if (previous && sourcesChanged) await writeSources(directory, previous, document).catch(() => undefined);
       throw error;
     }
   };
@@ -223,6 +269,33 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
       return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
     },
     readProject,
+    async listHistory(id) {
+      const {document, history} = await readRecord(id);
+      return {projectId: document.id, currentRevision: document.revision,
+        versions: (history.length ? history.map(({file, sha256, ...entry}) => {void file; void sha256; return entry;}) : [historySummary(document)]).reverse()};
+    },
+    async readHistory(id, revision) {
+      id = assertId(id);
+      assertRevision(revision);
+      const {document, history} = await readRecord(id);
+      if (!history.length && revision === document.revision) return document;
+      const entry = history.find((item) => item.revision === revision);
+      if (!entry) fail('HISTORY_NOT_FOUND', '해당 수정 버전의 저장본을 찾을 수 없습니다.', 404);
+      try {
+        const directory = await projectDirectory(id);
+        const target = await projectFile(directory, entry.file);
+        const contents = await readFile(target, 'utf8');
+        if (createHash('sha256').update(contents).digest('hex') !== entry.sha256) fail('INVALID_STORED_HISTORY', '수정 이력 파일이 저장 정보와 다릅니다.', 500);
+        const snapshot = validate(JSON.parse(contents));
+        const {file, sha256, ...summary} = entry;
+        void file; void sha256;
+        if (snapshot.id !== id || !isDeepStrictEqual(historySummary(snapshot), summary)) fail('INVALID_STORED_HISTORY', '수정 이력 파일이 프로젝트와 다릅니다.', 500);
+        return snapshot;
+      } catch (cause) {
+        if (cause instanceof StudioStoreError && !['INVALID_PROJECT'].includes(cause.code)) throw cause;
+        fail('INVALID_STORED_HISTORY', '수정 이력 파일을 읽을 수 없습니다.', 500);
+      }
+    },
     async getRequest(id, requestId) {
       id = assertId(id);
       if (typeof requestId !== 'string' || !UUID.test(requestId)) fail('INVALID_REQUEST_ID', '요청 ID는 UUID여야 합니다.');
@@ -244,7 +317,7 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
       id = assertId(id);
       const identity = requestIdentity(requestId, fingerprint, 'update');
       return serialized(id, async () => {
-        const {document: previous, receipts} = await readRecord(id);
+        const {document: previous, receipts, history} = await readRecord(id);
         if (replayed(receipts, identity)) return previous;
         assertCurrentRevision(previous, expectedRevision);
         const candidate = validate(project);
@@ -252,7 +325,7 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
           fail('IMMUTABLE_PROJECT_FIELD', '프로젝트 ID, 생성 시각, 수정 번호와 파일 목록은 직접 변경할 수 없습니다.');
         }
         const document = validate({...candidate, id: previous.id, createdAt: previous.createdAt, assets: previous.assets, revision: previous.revision + 1, updatedAt: new Date().toISOString()});
-        await persist(document, previous, appendedReceipts(receipts, identity, document.revision));
+        await persist(document, previous, appendedReceipts(receipts, identity, document.revision), history);
         return document;
       });
     },
@@ -260,7 +333,7 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
       id = assertId(id);
       const identity = requestIdentity(requestId, fingerprint, 'upload');
       return serialized(id, async () => {
-        const {document: previous, receipts} = await readRecord(id);
+        const {document: previous, receipts, history} = await readRecord(id);
         if (replayed(receipts, identity)) return previous;
         assertCurrentRevision(previous, expectedRevision);
         assertAssetName(name);
@@ -274,7 +347,7 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
         const document = validate({...previous, assets: [...previous.assets, asset], revision: previous.revision + 1, updatedAt: asset.createdAt});
         const directory = await projectDirectory(id);
         await writeAtomic(directory, asset.relativePath, bytes);
-        try {await writeAtomic(directory, 'project.json', storedJson(document, appendedReceipts(receipts, identity, document.revision)));} catch (error) {
+        try {await persist(document, previous, appendedReceipts(receipts, identity, document.revision), history, false);} catch (error) {
           const target = await projectFile(directory, asset.relativePath);
           await unlink(target).catch(() => undefined);
           throw error;

@@ -5,6 +5,16 @@ import {MAX_ASSET_BYTES, StudioStoreError} from './project-store.mjs';
 import {applyLayerEdits, readLayerRegistry, validateLayerEdits} from './layer-model.mjs';
 
 const error = (code, message, statusCode = 400) => new StudioStoreError(code, message, statusCode);
+const requestIdFor = (value) => {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw error('INVALID_REQUEST_ID', '요청 ID는 UUID여야 합니다.');
+  }
+  return value.toLowerCase();
+};
+const revisionFor = (value) => {
+  if (!Number.isSafeInteger(value) || value < 1) throw error('INVALID_REVISION', '올바른 수정 번호가 필요합니다.');
+  return value;
+};
 const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
 export const requestFingerprint = (tool, args) => createHash('sha256').update(JSON.stringify(canonical({tool, args}))).digest('hex');
@@ -140,13 +150,33 @@ export function createStudioController({store, runtime, origin = () => 'http://1
       return controller.status(project.id);
     },
     async save(id, input) {
-      try {validateProjectDocument(input.project);} catch (cause) {throw error('INVALID_PROJECT', cause.message);}
-      validateLayerEdits(input.project);
-      const previous = await store.readProject(id);
-      if (!isDeepStrictEqual(previous.source, input.project?.source)) throw error('SOURCE_UPDATE_REQUIRES_MCP', '소스 코드는 검증을 거치는 Codex 도구로 변경해 주세요.');
-      const saved = await store.updateProject(id, input);
-      void controller.refresh(saved.id, saved.revision).catch(() => undefined);
-      return saved;
+      revisionFor(input.expectedRevision);
+      const saveCandidate = async (previous, receipt = {}) => {
+        if (previous.revision !== input.expectedRevision) throw error('REVISION_CONFLICT', '프로젝트가 변경되었습니다. 최신 상태를 다시 열어 주세요.', 409);
+        try {validateProjectDocument(input.project);} catch (cause) {throw error('INVALID_PROJECT', cause.message);}
+        validateLayerEdits(input.project);
+        if (!isDeepStrictEqual(previous.source, input.project?.source)) throw error('SOURCE_UPDATE_REQUIRES_MCP', '소스 코드는 검증을 거치는 Codex 도구로 변경해 주세요.');
+        const saved = await store.updateProject(id, {expectedRevision: input.expectedRevision, project: input.project, ...receipt});
+        void controller.refresh(saved.id, saved.revision).catch(() => undefined);
+        return {project: saved};
+      };
+      if (input.requestId === undefined) return (await saveCandidate(await store.readProject(id))).project;
+      const result = await mutate('studio_browser_save', {projectId: id, requestId: requestIdFor(input.requestId),
+        expectedRevision: input.expectedRevision, project: input.project}, saveCandidate);
+      return result.replayed ? store.readProject(id) : result.project;
+    },
+    async restoreVersion(id, {targetRevision, expectedRevision, requestId}) {
+      revisionFor(targetRevision);
+      revisionFor(expectedRevision);
+      requestId = requestIdFor(requestId);
+      const result = await mutate('studio_restore_version', {projectId: id, targetRevision, expectedRevision, requestId}, async (project, receipt) => {
+        const target = await store.readHistory(project.id, targetRevision);
+        // Restore authored state while retaining every image uploaded since that version.
+        const candidate = {...project, name: target.name, composition: target.composition,
+          source: target.source, edits: target.edits};
+        return compileAndCommit(project, candidate, receipt);
+      });
+      return {...result, project: await store.readProject(id)};
     },
     async tool(name, args, clientName) {
       controller.connect(clientName);
