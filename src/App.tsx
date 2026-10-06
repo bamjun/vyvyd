@@ -79,7 +79,7 @@ function App() {
             {activeTab === 'studio' ? '포스터 메이커' : 'Convert, Resize, Crop & Merge'}
           </h2>
           <p className="text-gray-400 text-sm md:text-base">
-            {activeTab === 'studio' ? '브라우저에서 편집하고, 이 컴퓨터의 로컬 서비스에 저장·출력하세요. 새로운 디자인은 현재 Codex 대화에서 요청할 수 있습니다.' : '영상 변환과 이미지 편집은 브라우저에서 처리합니다. 결과는 다운로드하거나 선택해 Discord로 보낼 수 있습니다.'}
+            {activeTab === 'studio' ? '브라우저에서 편집하고, 이 컴퓨터의 로컬 서비스에 저장·출력하세요. 새로운 디자인은 MCP를 연결한 Codex 또는 Claude 대화에서 요청할 수 있습니다.' : '영상 변환과 이미지 편집은 브라우저에서 처리합니다. 결과는 다운로드하거나 선택해 Discord로 보낼 수 있습니다.'}
           </p>
         </div>
 
@@ -193,9 +193,9 @@ function App() {
               <Film className="w-6 h-6 text-indigo-400" />
             </div>
             <div>
-              <h4 className="font-semibold text-gray-200 mb-1">{activeTab === 'studio' ? '현재 Codex와 함께' : '결과 이어 편집'}</h4>
+              <h4 className="font-semibold text-gray-200 mb-1">{activeTab === 'studio' ? '연결한 AI와 함께' : '결과 이어 편집'}</h4>
               <p className="text-xs text-gray-400 leading-relaxed">
-                {activeTab === 'studio' ? '작업 요청을 복사해 현재 Codex 대화에 붙여넣으세요. Codex가 읽은 소스·이미지·편집 값은 그 대화의 AI 처리에 사용될 수 있습니다.' : '결과를 크기 줄이기·분할·합치기로 전달하세요. 대상 도구의 기존 파일과 설정을 유지하며 편집을 이어갈 수 있습니다.'}
+                {activeTab === 'studio' ? '작업 요청을 복사해 MCP를 연결한 AI 대화에 붙여넣으세요. AI가 읽은 소스·이미지·편집 값은 해당 앱의 AI 처리에 사용될 수 있습니다.' : '결과를 크기 줄이기·분할·합치기로 전달하세요. 대상 도구의 기존 파일과 설정을 유지하며 편집을 이어갈 수 있습니다.'}
               </p>
             </div>
           </div>
@@ -210,7 +210,7 @@ function App() {
             © {new Date().getFullYear()} vyvyd. 영상·이미지 편집은 브라우저에서, 포스터 저장·출력은 이 컴퓨터의 로컬 서비스에서 처리합니다.
           </div>
           <div className="flex space-x-4">
-            <span>Discord 전송 · Codex 요청은 선택할 때 사용합니다.</span>
+            <span>Discord 전송 · AI 요청은 선택할 때 사용합니다.</span>
           </div>
         </div>
       </footer>

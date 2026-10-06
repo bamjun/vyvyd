@@ -155,7 +155,7 @@ export default function StudioLayersPanel({registry, edits, assets, selectedId, 
   const canReorder = (direction: 'up' | 'down') => Boolean(selected && !disabled && getLayerReorderPatch(registry, edits, measured, selected.id, direction));
   return <section aria-labelledby={titleId} className="rounded-xl border border-white/10 bg-[#1a1c23] p-4">
     <div className="mb-3 flex items-center justify-between gap-2"><h2 id={titleId} className="text-sm font-medium text-white">레이어 편집</h2><span className="text-xs text-gray-500">{registry.length}개</span></div>
-    {!registry.length ? <p className="text-xs leading-relaxed text-gray-400">직접 편집할 레이어가 없습니다. 현재 Codex에 편집할 요소를 등록해 달라고 요청하세요.</p> : <>
+    {!registry.length ? <p className="text-xs leading-relaxed text-gray-400">직접 편집할 레이어가 없습니다. MCP를 연결한 AI에 편집할 요소를 등록해 달라고 요청하세요.</p> : <>
       <ul aria-label="레이어 목록" className="max-h-60 space-y-1 overflow-y-auto">
         {registry.map((layer, index) => {
           const values = getEffectiveLayerValues(layer, edits);

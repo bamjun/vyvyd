@@ -332,8 +332,8 @@ export function useStudioEditor(isActive: boolean) {
   const inspectorDisabled = busy || Boolean(remoteProject);
   const editingDisabled = inspectorDisabled || sourcePreview?.projectId !== project?.id || sourcePreview?.revision !== project?.revision;
   const asset = project?.assets.find((entry) => entry.id === selectedAsset);
-  const requestText = project ? ['vyvyd 포스터 메이커 프로젝트를 현재 Codex에서 작업해 주세요.', `프로젝트 ID: ${project.id}`, `저장된 수정 번호: ${project.revision}`, `프로젝트 이름: ${project.name}`, selectedLayer ? `선택한 레이어 ID: ${selectedLayer}` : '', aiRequest.trim() ? `요청: ${aiRequest.trim()}` : '요청: 이 프로젝트의 Remotion 소스를 작성하거나 수정해 주세요.', '먼저 vyvyd MCP에서 프로젝트와 소스, 파일, 편집 값을 읽어 주세요. expectedRevision을 확인하고 기존 직접 편집 값과 파일을 유지하세요.', dirty ? '브라우저에 미저장 설정·레이어 편집이 있으므로 저장본과 구분해 작업해 주세요.' : ''].filter(Boolean).join('\n') : '';
-  const copyRequest = async () => {try {await navigator.clipboard.writeText(requestText); setCopyStatus('복사했습니다. 현재 Codex 대화에 붙여넣으세요.');} catch {setCopyStatus('복사 내용 보기에서 문구를 선택해 직접 복사하세요.');}};
+  const requestText = project ? ['vyvyd 포스터 메이커 프로젝트를 현재 AI 대화에서 작업해 주세요.', `프로젝트 ID: ${project.id}`, `저장된 수정 번호: ${project.revision}`, `프로젝트 이름: ${project.name}`, selectedLayer ? `선택한 레이어 ID: ${selectedLayer}` : '', aiRequest.trim() ? `요청: ${aiRequest.trim()}` : '요청: 이 프로젝트의 Remotion 소스를 작성하거나 수정해 주세요.', '먼저 vyvyd MCP에서 프로젝트와 소스, 파일, 편집 값을 읽어 주세요. expectedRevision을 확인하고 기존 직접 편집 값과 파일을 유지하세요.', dirty ? '브라우저에 미저장 설정·레이어 편집이 있으므로 저장본과 구분해 작업해 주세요.' : ''].filter(Boolean).join('\n') : '';
+  const copyRequest = async () => {try {await navigator.clipboard.writeText(requestText); setCopyStatus('복사했습니다. MCP를 연결한 Codex 또는 Claude 대화에 붙여넣으세요.');} catch {setCopyStatus('복사 내용 보기에서 문구를 선택해 직접 복사하세요.');}};
   const keyboardShortcut = (event: KeyboardEvent<HTMLElement>) => {
     if (busy || remoteProject || !(event.ctrlKey || event.metaKey) || event.altKey) return;
     const target = event.target as HTMLElement;
