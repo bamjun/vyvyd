@@ -7,11 +7,12 @@ import StudioLayersPanel from './StudioLayersPanel';
 import StudioHistoryPanel from './StudioHistoryPanel';
 import {useStudioEditor} from './useStudioEditor';
 import type {Fields} from './studioEditorSettings';
-import {useRef} from 'react';
+import {useEffect, useRef} from 'react';
 import {useMediaTransfer} from '@/hooks/useMediaTransfer';
 import StudioExportPanel from './StudioExportPanel';
 import StudioBundleDownload from './StudioBundleDownload';
 import StudioSetupGuide from './StudioSetupGuide';
+import StudioWorkspace, {type StudioWorkspaceState} from './StudioWorkspace';
 
 const inputClass = 'mt-1 w-full rounded-lg border border-white/10 bg-[#121318] px-3 py-2 text-sm text-white focus:border-purple-400 focus:outline-none';
 const buttonClass = 'inline-flex items-center justify-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm text-gray-200 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40';
@@ -31,6 +32,10 @@ function SettingsFields({fields, onChange, disabled, creating = false}: {fields:
 }
 
 export default function StudioPanel({isActive}: {isActive: boolean}) {
+  return <StudioWorkspace isActive={isActive}>{(workspace) => <StudioEditor key={workspace.editorKey} isActive={isActive} workspace={workspace} />}</StudioWorkspace>;
+}
+
+function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: StudioWorkspaceState}) {
   const bundleInput = useRef<HTMLInputElement>(null);
   const {controller: mediaTransfer} = useMediaTransfer();
   const {
@@ -43,7 +48,8 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
     copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer,
     adoptRemote, undo, redo, canUndo, canRedo, beginInteraction, endInteraction, registerCancel, keyboardShortcut,
     refreshHistory, selectVersion, restoreVersion, restoreRecovery, hasDraft, importProject,
-  } = useStudioEditor(isActive);
+  } = useStudioEditor(isActive, workspace.storage?.workspaceKey, workspace.beforeConnect, workspace.storage?.baseDirectory);
+  useEffect(() => {workspace.onBlockedChange(dirty || busy || Boolean(pendingWrite) || creating, dirty || Boolean(pendingWrite) || creating);}, [workspace.onBlockedChange, dirty, busy, pendingWrite, creating]);
   const previewDocument = project;
   const fieldTarget = (target: EventTarget) => target instanceof HTMLElement && Boolean(target.closest('input,textarea,select'));
   const lastMcpSeen = runtimeStatus?.mcp.lastSeenAt ? Date.parse(runtimeStatus.mcp.lastSeenAt) : NaN;
@@ -57,6 +63,7 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
       <button className={buttonClass} disabled={busy} onClick={() => void connect(!project)}><RefreshCw size={14} className={busy ? 'animate-spin' : ''} />{connected ? '연결 확인' : '다시 연결'}</button>
     </div>
     <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400" role="status"><span className={`inline-flex items-center gap-2 ${connected ? 'text-green-300' : 'text-amber-200'}`}><span className={`h-2 w-2 rounded-full ${connected ? 'bg-green-400' : 'bg-amber-400'}`} />{connected ? '로컬 서비스 연결됨' : '로컬 서비스 연결 필요'}</span><span>{busy ? '처리 중…' : status}</span></div>
+    {workspace.control}
     <StudioSetupGuide connected={connected} />
     {!connected && <p className="text-xs leading-relaxed text-gray-400">현재 입력은 이 탭에 보관됩니다. 로컬 편집은 계속할 수 있고, 저장·파일 추가·버전 복원은 다시 연결한 뒤 사용할 수 있습니다.</p>}
     {error && <p role="alert" className="whitespace-pre-line rounded-xl border border-amber-400/20 bg-amber-400/5 p-3 text-sm text-amber-200">{error}</p>}

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {getCodexConfigPath, installCodexConfig, readCodexConfigStatus} from './cli-config.mjs';
+import {defaultStudioBaseDirectory, getStudioSettingsPath, readStorageSettings, saveStorageSettings} from './storage-settings.mjs';
 
 export const DEFAULT_STUDIO_PORT = 4180;
 const COMMANDS = new Set(['help', 'version', 'start', 'setup', 'mcp', 'doctor']);
@@ -35,6 +36,7 @@ Install globally before setup for a stable MCP command path:
 Environment: STUDIO_DATA_DIR selects the legacy projects directory directly;
 STUDIO_PORT, STUDIO_ALLOWED_ORIGIN, STUDIO_SERVICE_URL, CODEX_HOME and
 CHROME_EXECUTABLE are also supported. --data-dir selects a base directory.
+Without a path override, start reuses the folder last selected in the website.
 `;
 
 function parseArguments(argv) {
@@ -69,9 +71,7 @@ export function getStudioDataPaths({dataDir, env = process.env, platform = proce
   let baseDirectory;
   if (projectsDirectory) baseDirectory = paths.dirname(projectsDirectory);
   else if (dataDir) baseDirectory = paths.resolve(cwd, dataDir);
-  else if (platform === 'win32') baseDirectory = paths.join(env.LOCALAPPDATA || paths.join(homeDirectory, 'AppData', 'Local'), 'vyvyd', 'studio');
-  else if (platform === 'darwin') baseDirectory = paths.join(homeDirectory, 'Library', 'Application Support', 'vyvyd', 'studio');
-  else baseDirectory = paths.join(env.XDG_DATA_HOME || paths.join(homeDirectory, '.local', 'share'), 'vyvyd', 'studio');
+  else baseDirectory = defaultStudioBaseDirectory({env, platform, homeDirectory});
   return {baseDirectory, projectsDirectory: projectsDirectory ?? paths.join(baseDirectory, 'projects'),
     previewsDirectory: paths.join(baseDirectory, 'previews'), exportsDirectory: paths.join(baseDirectory, 'exports'),
     legacyEnvironment: Boolean(projectsDirectory)};
@@ -106,13 +106,22 @@ function onSignals(processImpl, close) {
   for (const signal of ['SIGINT', 'SIGTERM']) processImpl.once(signal, () => {void close();});
 }
 
+async function storageConfiguration(options, context) {
+  const settingsPath = context.storageSettingsPath ?? getStudioSettingsPath(context);
+  const explicit = options['data-dir'] || context.env.STUDIO_DATA_DIR;
+  const saved = explicit ? null : await readStorageSettings(settingsPath, context);
+  const data = getStudioDataPaths({...context, dataDir: options['data-dir'] ?? saved?.baseDirectory});
+  return {data, settingsPath};
+}
+
 async function startService(options, context) {
   const {env, stdout, processImpl} = context;
   const port = parseStudioPort(options.port ?? env.STUDIO_PORT ?? DEFAULT_STUDIO_PORT);
   const origin = options.origin ?? env.STUDIO_ALLOWED_ORIGIN;
-  const data = getStudioDataPaths({...context, dataDir: options['data-dir']});
+  const {data, settingsPath} = await storageConfiguration(options, context);
   const createServer = context.createStudioServer ?? (await import('./server.mjs')).createStudioServer;
-  const server = createServer({dataDir: data.projectsDirectory, allowedOrigins: origin ? [validateExactOrigin(origin)] : []});
+  const server = createServer({dataDir: data.projectsDirectory, allowedOrigins: origin ? [validateExactOrigin(origin)] : [],
+    storageSettings: {persistent: true, save: (baseDirectory) => saveStorageSettings(settingsPath, baseDirectory, context)}});
   try {
     await new Promise((resolve, reject) => {server.once('error', reject); server.listen(port, '127.0.0.1', resolve);});
   } catch (cause) {
@@ -128,7 +137,7 @@ async function startService(options, context) {
     await stopping;
   })();
   onSignals(processImpl, close);
-  stdout.write(`vyvyd studio: http://127.0.0.1:${port}\nProjects: ${data.projectsDirectory}\n`);
+  stdout.write(`vyvyd studio: http://127.0.0.1:${port}\nWorkspace: ${data.baseDirectory}\nProjects: ${data.projectsDirectory}\nStorage settings: ${settingsPath}\n`);
   if (port !== DEFAULT_STUDIO_PORT) stdout.write('The hosted website connects to port 4180. A custom port is for local integrations.\n');
   return 0;
 }
@@ -161,7 +170,7 @@ async function doctor(options, context) {
   const nodeSupported = nodeMajor > 22 || nodeMajor === 22 && nodeMinor >= 14;
   const getBrowser = context.getBrowserExecutable ?? (await import('./browser-executable.mjs')).getBrowserExecutable;
   const browser = getBrowser(context);
-  const data = getStudioDataPaths({...context, dataDir: options['data-dir']});
+  const {data} = await storageConfiguration(options, context);
   const configPath = getCodexConfigPath({...context, project: options.project});
   const config = await readCodexConfigStatus(configPath);
   const url = validateServiceUrl(options.url ?? context.env.STUDIO_SERVICE_URL ?? `http://127.0.0.1:${DEFAULT_STUDIO_PORT}`);

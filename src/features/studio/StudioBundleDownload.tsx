@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState} from 'react';
 import type {ProjectDocument} from '../../../packages/studio-runtime/src/project-model.mjs';
 import {studioBundleApi} from './studioBundleApi';
-import {STUDIO_SERVICE_URL} from './studioApi';
+import {studioFileUrl} from './studioApi';
 
 export default function StudioBundleDownload({project, connected, dirty}: {project: ProjectDocument; connected: boolean; dirty: boolean}) {
   const [busy, setBusy] = useState(false);
@@ -28,7 +28,7 @@ export default function StudioBundleDownload({project, connected, dirty}: {proje
     <p className="mt-2 text-xs text-gray-400">소스·이미지·레이어 편집값을 파일 하나로 보관합니다. 가져오면 별도 프로젝트로 열립니다.</p>
     {dirty && <p className="mt-2 text-xs text-amber-200">미저장 변경은 포함되지 않습니다. 저장 버전 {project.revision}를 내보냅니다.</p>}
     <div className="mt-3 flex flex-wrap items-center gap-3"><button type="button" disabled={!connected || busy} onClick={() => void download()} className="rounded-lg border border-white/10 px-3 py-2 text-sm text-gray-200 disabled:opacity-40">{busy ? '프로젝트 파일 준비 중…' : '프로젝트 파일 만들기'}</button>
-    {result && <a className="text-sm text-purple-200 underline" href={`${STUDIO_SERVICE_URL}/projects/${encodeURIComponent(project.id)}/bundle/${result.revision}`} download={result.name}>버전 {result.revision} 프로젝트 다운로드</a>}</div>
+    {result && <a className="text-sm text-purple-200 underline" href={studioFileUrl(`/projects/${encodeURIComponent(project.id)}/bundle/${result.revision}`)} download={result.name}>버전 {result.revision} 프로젝트 다운로드</a>}</div>
     {error && <p role="alert" className="mt-2 text-xs text-amber-200">{error}</p>}
   </div>;
 }

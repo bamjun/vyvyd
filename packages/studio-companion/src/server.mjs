@@ -9,6 +9,7 @@ import {parseTool} from './codex-tools.mjs';
 import {createWorkerPreviewRuntime} from './worker-preview-runtime.mjs';
 import {createExportManager} from './export-manager.mjs';
 import {exportProjectBundle, importProjectBundle, MAX_BUNDLE_JSON_BYTES} from './project-bundle.mjs';
+import {workspaceMetadata, validateWorkspaceDirectory} from './storage-workspace.mjs';
 
 const DEFAULT_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173', 'https://vyvyd.pages.dev'];
 const JSON_BODY_LIMIT = 8 * 1024 * 1024;
@@ -69,32 +70,42 @@ const bundleBytes = (bundle) => {
   return bytes;
 };
 
-export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins = [], previewRuntime, exportRenderer, exportDataDir} = {}) {
+export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins = [], previewRuntime, exportRenderer, exportDataDir, storageSettings} = {}) {
   const origins = new Set([...DEFAULT_ORIGINS, ...allowedOrigins].map((origin) => {
     const parsed = new URL(origin);
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin === 'null') throw new TypeError('Allowed origins must be HTTP or HTTPS origins');
     return parsed.origin;
   }));
-  const store = createProjectStore({dataDir});
-  const runtime = previewRuntime ?? createWorkerPreviewRuntime({storeDataDir: store.dataDir,
-    previewDataDir: path.join(path.dirname(store.dataDir), 'previews'), parentOrigins: [...origins]});
-  const controller = createStudioController({store, runtime, origin: () => {
-    const address = server.address();
-    return `http://127.0.0.1:${address?.port ?? 4180}`;
-  }});
-  const exports = createExportManager({store, runtime, dataDir: exportDataDir ?? path.join(path.dirname(store.dataDir), 'exports'),
-    origin: () => `http://127.0.0.1:${server.address()?.port ?? 4180}`, ...(exportRenderer ? {runRender: exportRenderer} : {})});
+  const makeWorkspace = (directory, outputDirectory) => {
+    const store = createProjectStore({dataDir: directory});
+    const metadata = workspaceMetadata(store.dataDir, {exportsDirectory: outputDirectory, persistent: storageSettings?.persistent === true});
+    const runtime = previewRuntime ?? createWorkerPreviewRuntime({storeDataDir: store.dataDir,
+      previewDataDir: metadata.previewsDirectory, parentOrigins: [...origins]});
+    const origin = () => `http://127.0.0.1:${server.address()?.port ?? 4180}`;
+    const controller = createStudioController({store, runtime, origin});
+    const exports = createExportManager({store, runtime, dataDir: metadata.exportsDirectory,
+      origin, ...(exportRenderer ? {runRender: exportRenderer} : {})});
+    return {store, runtime, controller, exports, metadata};
+  };
+  let workspace = makeWorkspace(dataDir, exportDataDir);
+  let activeMutations = 0;
+  let switching = false;
+  let storageChanged = false;
 
   const server = createServer(async (request, response) => {
+    let leased = false;
     response.setHeader('Vary', 'Origin');
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     response.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
     response.setHeader('X-Content-Type-Options', 'nosniff');
+    response.setHeader('X-Studio-Storage-Id', workspace.metadata.storageId);
+    response.setHeader('Access-Control-Expose-Headers', 'X-Studio-Storage-Id');
     try {
       const hostname = String(request.headers.host ?? '').split(':', 1)[0];
       if (!['127.0.0.1', 'localhost'].includes(hostname)) throw error('HOST_NOT_ALLOWED', '로컬 주소에서만 프로젝트 서비스에 연결할 수 있습니다.', 403);
+      const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
       const pathname = (request.url ?? '/').split('?', 1)[0];
       if (pathname.includes('\\') || pathname.includes('%') || pathname.split('/').includes('..')) throw error('INVALID_PATH', '올바른 프로젝트 경로가 필요합니다.');
       // Opaque sandbox previews can only read immutable preview snapshots, never project APIs.
@@ -118,7 +129,8 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
           response.writeHead(204); response.end(); return;
         }
         if (!['GET', 'HEAD'].includes(request.method)) throw error('METHOD_NOT_ALLOWED', '미리보기 파일은 읽기만 가능합니다.', 405);
-        if (await runtime.handle(request, response)) return;
+        const previewWorkspace = workspace;
+        if (await previewWorkspace.runtime.handle(request, response)) return;
         throw error('NOT_FOUND', '미리보기 파일을 찾을 수 없습니다.', 404);
       }
       const origin = request.headers.origin;
@@ -133,7 +145,7 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
       }
       if (request.method === 'OPTIONS') {
         response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, OPTIONS');
-        response.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name, X-Expected-Revision');
+        response.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name, X-Expected-Revision, X-Studio-Storage-Id');
         response.setHeader('Access-Control-Max-Age', '600');
         if (request.headers['access-control-request-private-network'] === 'true') response.setHeader('Access-Control-Allow-Private-Network', 'true');
         response.writeHead(204);
@@ -144,6 +156,66 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         json(response, 200, {service: 'vyvyd-studio', protocolVersion: 2, status: 'ok'});
         return;
       }
+      if (pathname === '/storage') {
+        if (request.method === 'GET') {json(response, 200, workspace.metadata); return;}
+        if (request.method !== 'PUT') throw error('METHOD_NOT_ALLOWED', '작업 폴더 설정은 GET 또는 PUT을 사용합니다.', 405);
+        const input = await readJson(request);
+        if (input.expectedStorageId !== workspace.metadata.storageId) throw error('STORAGE_CHANGED', '작업 폴더가 변경되었습니다. 현재 폴더를 다시 확인해 주세요.', 409);
+        if (switching || activeMutations > 0 || workspace.controller.busy() || workspace.exports.busy()) {
+          throw error('STORAGE_BUSY', '저장·미리보기·출력 작업을 마친 뒤 작업 폴더를 변경해 주세요.', 409);
+        }
+        switching = true;
+        let candidate;
+        try {
+          const currentLeaf = path.basename(workspace.metadata.projectsDirectory);
+          const customLayout = (process.platform === 'win32' ? currentLeaf.toLowerCase() : currentLeaf) !== 'projects';
+          if (customLayout && typeof input.baseDirectory === 'string' && path.isAbsolute(input.baseDirectory.trim())
+            && workspaceMetadata(path.join(path.resolve(input.baseDirectory.trim()), currentLeaf)).workspaceKey === workspace.metadata.workspaceKey) {
+            throw error('STORAGE_LEGACY_LAYOUT', '현재 폴더는 사용자 지정 구조입니다. 기존 실행 설정을 유지하거나 projects 하위 폴더를 사용하는 다른 작업 폴더를 선택해 주세요.', 409);
+          }
+          const baseDirectory = await validateWorkspaceDirectory(input.baseDirectory);
+          const candidateDirectory = path.join(baseDirectory, 'projects');
+          const metadata = workspaceMetadata(candidateDirectory);
+          const persist = async () => {
+            if (!storageSettings?.save) return;
+            try {await storageSettings.save(baseDirectory);} catch {
+              throw error('STORAGE_SETTINGS_FAILED', '작업 폴더 설정을 저장하지 못했습니다. 기존 폴더를 유지합니다.', 500);
+            }
+          };
+          if (metadata.workspaceKey === workspace.metadata.workspaceKey) {await persist(); json(response, 200, workspace.metadata); return;}
+          await createProjectStore({dataDir: candidateDirectory}).listProjects();
+          candidate = makeWorkspace(candidateDirectory);
+          await candidate.exports.settled();
+          await persist();
+          const previous = workspace;
+          workspace = candidate;
+          candidate = null;
+          storageChanged = true;
+          response.setHeader('X-Studio-Storage-Id', workspace.metadata.storageId);
+          await previous.exports.shutdown().catch(() => undefined);
+          json(response, 200, workspace.metadata);
+        } finally {
+          if (candidate) await candidate.exports.shutdown().catch(() => undefined);
+          switching = false;
+        }
+        return;
+      }
+      if (switching) throw error('STORAGE_SWITCHING', '작업 폴더를 변경하고 있습니다. 잠시 후 다시 연결해 주세요.', 409);
+      const providedScope = request.headers['x-studio-storage-id'];
+      const scopeQueries = requestUrl.searchParams.getAll('storageId');
+      if (providedScope !== undefined && providedScope !== workspace.metadata.storageId
+        || scopeQueries.length > 1 || scopeQueries.length === 1 && scopeQueries[0] !== workspace.metadata.storageId) {
+        throw error('STORAGE_CHANGED', '작업 폴더가 변경되었습니다. 프로젝트 목록을 다시 읽어 주세요.', 409);
+      }
+      const refreshMcp = ['/codex/connect', '/codex/tools/studio_list_projects', '/codex/tools/studio_read_project'].includes(pathname);
+      if (mutation && storageChanged && !providedScope && scopeQueries.length === 0 && !refreshMcp) {
+        throw error('STORAGE_CHANGED', '작업 폴더가 변경되었습니다. 서비스를 다시 연결하고 최신 프로젝트를 읽어 주세요.', 409);
+      }
+      // Every request holds one immutable workspace context across all awaits.
+      const {store, runtime, controller, exports} = workspace;
+      // Scoped reads may finish against their captured folder while switching.
+      // Only writes and background jobs need to hold the switch gate.
+      if (mutation) {activeMutations++; leased = true;}
       if (pathname.startsWith('/codex/')) {
         if (request.method !== 'POST') throw error('METHOD_NOT_ALLOWED', 'MCP 요청은 POST를 사용합니다.', 405);
         if (origin !== undefined || request.headers['sec-fetch-site'] !== undefined || request.headers['sec-fetch-dest'] !== undefined) throw error('MCP_BROWSER_REQUEST_FORBIDDEN', 'MCP 연결은 로컬 Codex 프로세스에서만 사용할 수 있습니다.', 403);
@@ -288,12 +360,13 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
       if (response.headersSent) {response.destroy(); return;}
       const known = cause instanceof StudioStoreError;
       json(response, known ? cause.statusCode : 500, {error: {code: known ? cause.code : 'INTERNAL_ERROR', message: known ? cause.message : '로컬 프로젝트 저장소에서 오류가 발생했습니다.', ...(known && cause.diagnostics ? {diagnostics: cause.diagnostics} : {})}});
-    }
+    } finally {if (leased) activeMutations--;}
   });
   server.requestTimeout = 30_000;
   server.headersTimeout = 15_000;
-  server.studio = {store, controller, runtime, exports};
-  server.once('close', () => {void exports.shutdown();});
+  server.studio = Object.fromEntries(['store', 'controller', 'runtime', 'exports'].map((key) => [key, null]));
+  for (const key of ['store', 'controller', 'runtime', 'exports']) Object.defineProperty(server.studio, key, {enumerable: true, get: () => workspace[key]});
+  server.once('close', () => {void workspace.exports.shutdown();});
   return server;
 }
 

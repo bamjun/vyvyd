@@ -1,6 +1,13 @@
 import type {ProjectDocument, ProjectComposition, ProjectSettings} from '../../../packages/studio-runtime/src/project-model.mjs';
 
-export const STUDIO_SERVICE_URL = 'http://127.0.0.1:4180';
+export const STUDIO_SERVICE_URL = import.meta.env.VITE_STUDIO_SERVICE_URL || 'http://127.0.0.1:4180';
+export type StudioStorage = {
+  storageId: string; workspaceKey: string; baseDirectory: string; projectsDirectory: string;
+  previewsDirectory: string; exportsDirectory: string; persistent: boolean;
+};
+let storageScope: Pick<StudioStorage, 'storageId' | 'workspaceKey'> | null = null;
+export const setStudioStorageScope = (storage: StudioStorage | null) => {storageScope = storage;};
+export const getStudioWorkspaceKey = () => storageScope?.workspaceKey;
 export type ProjectSummary = Pick<ProjectDocument, 'id' | 'name' | 'revision' | 'updatedAt'> & {composition: ProjectComposition; assetCount: number};
 export type ProjectVersion = Pick<ProjectDocument, 'revision' | 'name' | 'updatedAt' | 'composition'> & {assetCount: number};
 export type ProjectHistory = {projectId: string; currentRevision: number; versions: ProjectVersion[]};
@@ -18,11 +25,28 @@ export class StudioApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 15000): Promise<T> {
+export async function studioFetch(path: string, init: RequestInit = {}, scoped = true): Promise<Response> {
+  const scope = storageScope?.storageId;
+  const headers = new Headers(init.headers);
+  if (scoped && scope) headers.set('X-Studio-Storage-Id', scope);
+  const response = await fetch(`${STUDIO_SERVICE_URL}${path}`, {...init, headers});
+  if (scoped && scope && (scope !== storageScope?.storageId || response.headers.get('X-Studio-Storage-Id') && response.headers.get('X-Studio-Storage-Id') !== scope)) {
+    throw new StudioApiError('작업 폴더가 변경되었습니다. 현재 입력을 보관하고 작업 폴더를 다시 확인하세요.', 'STORAGE_CHANGED', 409);
+  }
+  return response;
+}
+
+export const studioFileUrl = (path: string) => {
+  const url = new URL(path, STUDIO_SERVICE_URL);
+  if (storageScope) url.searchParams.set('storageId', storageScope.storageId);
+  return url.href;
+};
+
+async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 15000, scoped = true): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${STUDIO_SERVICE_URL}${path}`, {...init, signal: controller.signal});
+    const response = await studioFetch(path, {...init, signal: controller.signal}, scoped);
     const payload = await response.json();
     if (!response.ok) throw new StudioApiError(payload.error?.message ?? '요청을 처리하지 못했습니다.', payload.error?.code ?? 'REQUEST_FAILED', response.status);
     return payload as T;
@@ -37,7 +61,9 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 1500
 const json = (body: unknown): RequestInit => ({headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
 
 export const studioApi = {
-  health: () => request<{service: string; status: string; protocolVersion: number}>('/health'),
+  health: () => request<{service: string; status: string; protocolVersion: number}>('/health', {}, 15000, false),
+  storage: () => request<StudioStorage>('/storage', {}, 5000, false),
+  setStorage: (baseDirectory: string, expectedStorageId: string) => request<StudioStorage>('/storage', {method: 'PUT', ...json({baseDirectory, expectedStorageId})}, 15000, false),
   list: () => request<ProjectSummary[]>('/projects'),
   create: (settings: ProjectSettings) => request<ProjectDocument>('/projects', {method: 'POST', ...json(settings)}),
   open: (id: string) => request<ProjectDocument>(`/projects/${encodeURIComponent(id)}`),
@@ -52,5 +78,5 @@ export const studioApi = {
     method: 'POST', body: file,
     headers: {'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name), 'X-Expected-Revision': String(project.revision)},
   }),
-  assetUrl: (projectId: string, assetId: string) => `${STUDIO_SERVICE_URL}/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}`,
+  assetUrl: (projectId: string, assetId: string) => studioFileUrl(`/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}`),
 };

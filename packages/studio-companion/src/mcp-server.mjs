@@ -9,13 +9,19 @@ export function createStudioMcpServer({url = 'http://127.0.0.1:4180', fetchImpl 
   if (service.protocol !== 'http:' || service.hostname !== '127.0.0.1' || service.pathname !== '/' || service.search || service.hash || service.username || service.password) throw new TypeError('MCP service must be an HTTP URL on 127.0.0.1.');
   const server = new McpServer({name: 'vyvyd-studio', version: '0.2.0'}, {instructions: MCP_INSTRUCTIONS});
   let heartbeat;
+  let storageId;
   const request = async (pathname, args) => {
+    // Only an explicit project re-read may move this AI session to a new folder.
+    // Heartbeats must never authorize a write based on a previous workspace.
+    const reread = ['/codex/tools/studio_list_projects', '/codex/tools/studio_read_project'].includes(pathname);
+    const scoped = pathname !== '/codex/connect' && !reread && storageId;
     let response;
     try {
-      response = await fetchImpl(new URL(pathname, service), {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Studio-MCP-Client': encodeURIComponent(server.server.getClientVersion()?.name ?? 'MCP client')}, body: JSON.stringify(args), signal: AbortSignal.timeout(180000)});
+      response = await fetchImpl(new URL(pathname, service), {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Studio-MCP-Client': encodeURIComponent(server.server.getClientVersion()?.name ?? 'MCP client'), ...(scoped ? {'X-Studio-Storage-Id': storageId} : {})}, body: JSON.stringify(args), signal: AbortSignal.timeout(180000)});
     } catch {throw new Error('포스터 메이커 서비스에 연결할 수 없습니다. vyvyd-studio start 또는 npx @bamjun/vyvyd-studio@latest start를 실행해 주세요. 개발 저장소에서는 npm run studio:server를 사용할 수 있습니다.');}
     const result = await response.json();
     if (!response.ok) throw new Error(`${result.error?.code ?? response.status}: ${result.error?.message ?? '로컬 프로젝트 요청에 실패했습니다.'}`);
+    if (reread) storageId = response.headers?.get?.('X-Studio-Storage-Id') ?? undefined;
     return result;
   };
   for (const definition of CODEX_TOOLS) {

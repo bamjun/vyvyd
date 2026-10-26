@@ -242,6 +242,7 @@ export function createStudioController({store, runtime, origin = () => 'http://1
       }
       throw error('UNKNOWN_TOOL', '지원하지 않는 Codex 도구입니다.', 404);
     },
+    busy() {return jobs.size > 0 || inFlight.size > 0 || [...states.values()].some((value) => value.state === 'compiling');},
     async settled() {await Promise.allSettled([...jobs.values(), ...[...inFlight.values()].map((entry) => entry.promise)]);},
   };
   return controller;

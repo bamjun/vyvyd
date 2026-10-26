@@ -3,7 +3,8 @@ import type {ProjectDocument} from '../../../packages/studio-runtime/src/project
 import {validateProjectSettings} from '../../../packages/studio-runtime/src/project-model.mjs';
 import type {ExportJob, ExportOptions} from '../../../packages/studio-runtime/src/export-model.mjs';
 import {validateExportOptions} from '../../../packages/studio-runtime/src/export-model.mjs';
-import {StudioApiError} from './studioApi';
+import {getStudioWorkspaceKey, StudioApiError} from './studioApi';
+import {studioWorkspaceKeys} from './studioWorkspaceKeys.mjs';
 import {studioExportApi} from './studioExportApi';
 import {mergeStudioExportJobs} from './studioExportJobs.mjs';
 
@@ -13,12 +14,11 @@ type PendingOutput = {
 } | {kind: 'retry'; projectId: string; jobId: string; requestId: string};
 type ProjectOutputs = {jobs: ExportJob[]; pending: PendingOutput | null; busy: boolean; error: string; connectionError: string};
 const empty = (): ProjectOutputs => ({jobs: [], pending: null, busy: false, error: '', connectionError: ''});
-const keyFor = (id: string) => `vyvyd.studio.export-request.${id}`;
 const uuid = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
 
-function readPending(projectId: string): PendingOutput | null {
+function readPending(projectId: string, key: string): PendingOutput | null {
   try {
-    const value = JSON.parse(sessionStorage.getItem(keyFor(projectId)) ?? 'null');
+    const value = JSON.parse(sessionStorage.getItem(key) ?? 'null');
     if (!value || value.projectId !== projectId || !uuid.test(value.requestId)) return null;
     if (value.kind === 'retry' && uuid.test(value.jobId)) return {kind: 'retry', projectId, jobId: value.jobId, requestId: value.requestId};
     if (value.kind !== 'start' || !Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 1) return null;
@@ -31,6 +31,7 @@ function readPending(projectId: string): PendingOutput | null {
 }
 
 export function useStudioExports(project: ProjectDocument, connected: boolean, onConnectionError?: (message: string) => void) {
+  const keys = useRef(studioWorkspaceKeys(getStudioWorkspaceKey()));
   const [states, setStates] = useState<Record<string, ProjectOutputs>>({});
   const cache = useRef<Record<string, ProjectOutputs>>({});
   const mounted = useRef(false);
@@ -46,8 +47,8 @@ export function useStudioExports(project: ProjectDocument, connected: boolean, o
   const pending = useCallback((id: string, value: PendingOutput | null) => {
     patch(id, {pending: value});
     try {
-      if (value) sessionStorage.setItem(keyFor(id), JSON.stringify(value));
-      else sessionStorage.removeItem(keyFor(id));
+      if (value) sessionStorage.setItem(keys.current.exportKey(id), JSON.stringify(value));
+      else sessionStorage.removeItem(keys.current.exportKey(id));
     } catch {
       patch(id, {error: '출력 요청은 현재 화면에 보관했습니다. 이 탭을 새로고침하기 전에 출력 결과를 확인해 주세요.'});
     }
@@ -80,7 +81,7 @@ export function useStudioExports(project: ProjectDocument, connected: boolean, o
     const id = project.id;
     if (!initialized.current.has(id)) {
       initialized.current.add(id);
-      patch(id, {pending: readPending(id)});
+      patch(id, {pending: readPending(id, keys.current.exportKey(id))});
     }
     if (!connected) return;
     let stopped = false;

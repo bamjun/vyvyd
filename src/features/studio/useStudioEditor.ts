@@ -8,23 +8,21 @@ import {confirmStudioWrite} from '../../../packages/studio-runtime/src/write-con
 import {initialFields, settingsFor, type Fields} from './studioEditorSettings';
 import {studioApi, StudioApiError, type ProjectHistory, type ProjectRuntimeStatus, type ProjectSummary} from './studioApi';
 import {studioBundleApi} from './studioBundleApi';
+import {studioWorkspaceKeys} from './studioWorkspaceKeys.mjs';
 
 type Preview = {projectId: string; revision: number; url: string};
 type PendingWrite = {kind: 'save' | 'restore'; requestId: string; expectedRevision: number; submitted: StudioDraftSnapshot; project?: ProjectDocument; targetRevision?: number};
 type Backup = {base: ProjectDocument; snapshot: StudioDraftSnapshot};
 type Session = {base: ProjectDocument; history: EditHistory<StudioDraftSnapshot>; preview: Preview | null; runtime: ProjectRuntimeStatus | null; remote: ProjectDocument | null; pending: PendingWrite | null; selectedLayer: string | null; selectedAsset: string | null; editMode: boolean; request: string};
-const selectedKey = 'vyvyd.studio.currentProject';
-const frameKey = 'vyvyd.studio.frames';
-const draftKey = (id: string) => `vyvyd.studio.draft.${id}`;
-const backupKey = (id: string) => `vyvyd.studio.recovery.${id}`;
 const read = (key: string, session = false) => {try {return (session ? sessionStorage : localStorage).getItem(key);} catch {return null;}};
 const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, ordered(item)])) : value;
 const same = (a: unknown, b: unknown) => JSON.stringify(ordered(a)) === JSON.stringify(ordered(b));
 const messageFor = (cause: unknown) => cause instanceof Error ? cause.message : '요청을 처리하지 못했습니다.';
 const storedDraft = (key: string) => {try {return parseStoredStudioDraft(JSON.parse(read(key, true) ?? 'null'));} catch {return null;}};
-const loadFrames = (): Record<string, number> => {try {const value: unknown = JSON.parse(read(frameKey) ?? '{}'); if (!value || typeof value !== 'object' || Array.isArray(value)) return {}; return Object.fromEntries(Object.entries(value).filter(([id, frame]) => /^[0-9a-f-]{36}$/i.test(id) && Number.isSafeInteger(frame) && Number(frame) >= 0).map(([id, frame]) => [id, Number(frame)]));} catch {return {};}};
+const loadFrames = (frameKey: string): Record<string, number> => {try {const value: unknown = JSON.parse(read(frameKey) ?? '{}'); if (!value || typeof value !== 'object' || Array.isArray(value)) return {}; return Object.fromEntries(Object.entries(value).filter(([id, frame]) => /^[0-9a-f-]{36}$/i.test(id) && Number.isSafeInteger(frame) && Number(frame) >= 0).map(([id, frame]) => [id, Number(frame)]));} catch {return {};}};
 
-export function useStudioEditor(isActive: boolean) {
+export function useStudioEditor(isActive: boolean, workspaceKey?: string, beforeConnect?: () => Promise<boolean>, baseDirectory?: string) {
+  const {selectedKey, frameKey, draftKey, backupKey} = useMemo(() => studioWorkspaceKeys(workspaceKey), [workspaceKey]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<ProjectDocument | null>(null);
   const [editor, setEditor] = useState(() => createEditHistory<StudioDraftSnapshot>({fields: initialFields, layers: {}}));
@@ -52,7 +50,9 @@ export function useStudioEditor(isActive: boolean) {
   const [selectedVersion, setSelectedVersion] = useState<ProjectDocument | null>(null);
   const projectRef = useRef(project), editorRef = useRef(editor), busyRef = useRef(false), connectedRef = useRef(false);
   const pendingRef = useRef<PendingWrite | null>(null), cancelRef = useRef<(() => void) | null>(null);
-  const sessions = useRef(new Map<string, Session>()), frames = useRef(loadFrames());
+  const sessions = useRef(new Map<string, Session>()), frames = useRef(loadFrames(frameKey));
+  const beforeConnectRef = useRef(beforeConnect);
+  beforeConnectRef.current = beforeConnect;
   const runtimeRef = useRef(runtimeStatus), previewRef = useRef(sourcePreview), remoteRef = useRef(remoteProject);
   const selectionRef = useRef({selectedLayer, selectedAsset, editMode, aiRequest});
   // Late responses must stay scoped to the project/operation that started them.
@@ -74,7 +74,7 @@ export function useStudioEditor(isActive: boolean) {
       else sessionStorage.removeItem(draftKey(base.id));
       setDraftNotice('');
     } catch {setDraftNotice('현재 입력은 메모리에 유지됩니다. 이 브라우저의 임시 저장 공간이 부족해 새로고침 복구용 사본을 보관하지 못했습니다.');}
-  }, []);
+  }, [draftKey]);
   const schedulePersist = useCallback(() => {window.clearTimeout(persistTimer.current); persistTimer.current = window.setTimeout(persist, 200);}, [persist]);
   const replaceEditor = useCallback((history: EditHistory<StudioDraftSnapshot>) => {editorRef.current = history; setEditor(history); schedulePersist();}, [schedulePersist]);
   const beginInteraction = useCallback(() => replaceEditor(beginEditHistory(editorRef.current)), [replaceEditor]);
@@ -111,7 +111,7 @@ export function useStudioEditor(isActive: boolean) {
     setFrame(Math.max(0, Math.min(frames.current[doc.id] ?? 0, doc.composition.durationInFrames - 1)));
     try {localStorage.setItem(selectedKey, doc.id);} catch { /* Selection is also kept in memory. */ }
     updateSummary(doc); schedulePersist();
-  }, [cancelInteraction, replaceEditor, schedulePersist, updateSummary]);
+  }, [cancelInteraction, replaceEditor, schedulePersist, selectedKey, updateSummary]);
   const reconcile = useCallback((latest: ProjectDocument) => {
     const base = projectRef.current;
     if (!base || latest.id !== base.id) return;
@@ -123,7 +123,7 @@ export function useStudioEditor(isActive: boolean) {
   }, [acceptProject, updateSummary]);
   const acceptRuntimeStatus = useCallback((id: string, next: ProjectRuntimeStatus) => {
     const base = projectRef.current;
-    if (base?.id !== id || next.revision < base.revision) return;
+    if (!mounted.current || base?.id !== id || next.revision < base.revision) return;
     setRuntimeStatus(next); runtimeRef.current = next;
     const compiled = next.compile;
     if (compiled.previewUrl && Number.isSafeInteger(compiled.revision) && Number(compiled.revision) >= 1 && Number(compiled.revision) <= base.revision) {
@@ -134,7 +134,11 @@ export function useStudioEditor(isActive: boolean) {
     }
   }, []);
   const markFailure = useCallback((cause: unknown) => {
-    if (cause instanceof StudioApiError && cause.status === 0) {connectedRef.current = false; setConnected(false); setStatus('연결 끊김 · 현재 입력과 되돌리기 이력 유지');}
+    if (!mounted.current) return;
+    if (cause instanceof StudioApiError && (cause.status === 0 || cause.code === 'STORAGE_CHANGED')) {
+      connectedRef.current = false; setConnected(false);
+      setStatus(cause.code === 'STORAGE_CHANGED' ? '작업 폴더 변경됨 · 현재 입력과 되돌리기 이력 유지' : '연결 끊김 · 현재 입력과 되돌리기 이력 유지');
+    }
     setError(messageFor(cause));
   }, []);
   // Keep only edits made after submission when a delayed write is confirmed.
@@ -146,7 +150,7 @@ export function useStudioEditor(isActive: boolean) {
   }, [acceptProject, persist, setPending]);
   const refreshHistory = useCallback(async () => {
     const id = projectRef.current?.id;
-    if (!id || !connectedRef.current) return;
+    if (!mounted.current || !id || !connectedRef.current) return;
     try {const history = await studioApi.history(id); if (mounted.current && projectRef.current?.id === id) setVersionHistory(history);} catch (cause) {if (projectRef.current?.id === id) markFailure(cause);}
   }, [markFailure]);
   const resolvePending = useCallback(async (latest: ProjectDocument) => {
@@ -155,7 +159,7 @@ export function useStudioEditor(isActive: boolean) {
     try {
       const receipt = await studioApi.receipt(latest.id, pending.requestId);
       const confirmed = await confirmStudioWrite(latest, receipt, {projectId: latest.id, requestId: pending.requestId}, studioApi.open);
-      if (projectRef.current?.id === latest.id && pendingRef.current?.requestId === pending.requestId) acknowledge(confirmed, pending);
+      if (mounted.current && projectRef.current?.id === latest.id && pendingRef.current?.requestId === pending.requestId) acknowledge(confirmed, pending);
       return true;
     } catch (cause) {if (!(cause instanceof StudioApiError && cause.status === 404)) throw cause;}
     return false;
@@ -185,15 +189,22 @@ export function useStudioEditor(isActive: boolean) {
       if (!mounted.current || operation.current !== token) return;
       if (!cached || reopen) {setPending(null); acceptProject(latest, false, undefined, true); useRecovery(); setStatus('저장된 프로젝트를 다시 열었습니다.');}
       else if (!await resolvePending(latest)) reconcile(latest);
+      if (!mounted.current || operation.current !== token) return;
       const nextStatus = await studioApi.status(id);
-      if (operation.current === token) acceptRuntimeStatus(id, nextStatus);
+      if (!mounted.current || operation.current !== token) return;
+      acceptRuntimeStatus(id, nextStatus);
       void refreshHistory(); persist();
     } catch (cause) {if (operation.current === token) markFailure(cause);} finally {if (operation.current === token) setBusy(false);}
-  }, [acceptProject, acceptRuntimeStatus, cancelInteraction, markFailure, persist, reconcile, refreshHistory, replaceEditor, resolvePending, setBusy, setPending, stash, updateSummary]);
+  }, [acceptProject, acceptRuntimeStatus, backupKey, cancelInteraction, draftKey, markFailure, persist, reconcile, refreshHistory, replaceEditor, resolvePending, selectedKey, setBusy, setPending, stash, updateSummary]);
 
   const connect = useCallback(async (initial = false) => {
     commitInteraction(); persist(); const token = ++operation.current; setBusy(true); setError('');
     try {
+      if (beforeConnectRef.current && !await beforeConnectRef.current()) {
+        if (mounted.current && token === operation.current) {connectedRef.current = false; setConnected(false); setStatus('작업 폴더를 확인하고 폴더 다시 열기를 눌러 주세요. 현재 입력은 보관했습니다.');}
+        return;
+      }
+      if (!mounted.current || token !== operation.current) return;
       const health = await studioApi.health();
       if (health.service !== 'vyvyd-studio' || health.status !== 'ok' || ![1, 2].includes(health.protocolVersion)) throw new Error('포스터 메이커 서비스의 응답이 다릅니다.');
       const list = await studioApi.list();
@@ -205,12 +216,15 @@ export function useStudioEditor(isActive: boolean) {
         const latest = await studioApi.open(id);
         if (token !== operation.current || projectRef.current?.id !== id) return;
         if (!await resolvePending(latest)) reconcile(latest);
-        acceptRuntimeStatus(id, await studioApi.status(id)); void refreshHistory();
+        if (!mounted.current || token !== operation.current) return;
+        const nextStatus = await studioApi.status(id);
+        if (!mounted.current || token !== operation.current) return;
+        acceptRuntimeStatus(id, nextStatus); void refreshHistory();
       }
     } catch (cause) {if (token === operation.current) {connectedRef.current = false; setConnected(false); markFailure(cause); const id = initial && !projectRef.current ? read(selectedKey) : null; if (id && storedDraft(draftKey(id))) {setBusy(false); await activate(id);}}}
     finally {if (token === operation.current) setBusy(false);}
-  }, [acceptRuntimeStatus, activate, commitInteraction, markFailure, persist, reconcile, refreshHistory, resolvePending, setBusy]);
-  useEffect(() => {mounted.current = true; if (!initialized.current) {initialized.current = true; void connect(true);} return () => {mounted.current = false; window.clearTimeout(persistTimer.current); persist();};}, [connect, persist]);
+  }, [acceptRuntimeStatus, activate, commitInteraction, draftKey, markFailure, persist, reconcile, refreshHistory, resolvePending, selectedKey, setBusy]);
+  useEffect(() => {mounted.current = true; if (!initialized.current) {initialized.current = true; void connect(true);} return () => {mounted.current = false; initialized.current = false; operation.current++; window.clearTimeout(persistTimer.current); persist();};}, [connect, persist]);
   useEffect(() => {
     const id = project?.id;
     if (!id || !connected || creating) return;
@@ -224,7 +238,7 @@ export function useStudioEditor(isActive: boolean) {
         reconcile(latest); acceptRuntimeStatus(id, nextStatus);
         const key = `${id}-${latest.revision}`;
         if (nextStatus.revision === latest.revision && nextStatus.compile.state === 'idle' && autoCompileKey.current !== key) {autoCompileKey.current = key; const compiled = await studioApi.compile(id, latest.revision); if (!disposed) acceptRuntimeStatus(id, compiled);}
-      } catch (cause) {if (!disposed && !(cause instanceof StudioApiError && cause.status === 409)) markFailure(cause);} finally {polling = false;}
+      } catch (cause) {if (!disposed && !(cause instanceof StudioApiError && cause.status === 409 && cause.code !== 'STORAGE_CHANGED')) markFailure(cause);} finally {polling = false;}
     };
     void poll(); const timer = window.setInterval(() => void poll(), 2000);
     const refresh = () => {if (document.visibilityState === 'visible') void poll();};
@@ -237,9 +251,9 @@ export function useStudioEditor(isActive: boolean) {
     const warn = (event: BeforeUnloadEvent) => {saveDraft(); const base = projectRef.current; if (base && (!same(editorRef.current.present, studioDraftForProject(base)) || pendingRef.current)) {event.preventDefault(); event.returnValue = '';}};
     window.addEventListener('pagehide', saveDraft); window.addEventListener('beforeunload', warn);
     return () => {window.removeEventListener('pagehide', saveDraft); window.removeEventListener('beforeunload', warn);};
-  }, [persist]);
+  }, [frameKey, persist]);
   useEffect(() => {if (!isActive) {cancelInteraction(); playerRef.current?.pause(); persist();}}, [isActive, cancelInteraction, persist]);
-  const updateSourceFrame = useCallback((nextFrame: number, save = false) => {const id = projectRef.current?.id; if (!id) return; frames.current[id] = nextFrame; setFrame(nextFrame); if (save) try {localStorage.setItem(frameKey, JSON.stringify(frames.current));} catch { /* Position remains in memory. */ }}, []);
+  const updateSourceFrame = useCallback((nextFrame: number, save = false) => {const id = projectRef.current?.id; if (!id) return; frames.current[id] = nextFrame; setFrame(nextFrame); if (save) try {localStorage.setItem(frameKey, JSON.stringify(frames.current));} catch { /* Position remains in memory. */ }}, [frameKey]);
   const reportPreviewError = useCallback((message: string) => setError(`소스 미리보기 오류: ${message}`), []);
   const selectLayer = useCallback((id: string | null) => {setSelectedLayer(id); if (id) setEditMode(true);}, []);
   const changeLayer = useCallback((id: string, patch: Record<string, unknown | null>) => {
@@ -270,9 +284,9 @@ export function useStudioEditor(isActive: boolean) {
       if (mounted.current && token === operation.current && projectRef.current?.id === base.id) {acknowledge(saved, pending); void refreshHistory();}
     } catch (cause) {
       if (token !== operation.current) return;
-      if (cause instanceof StudioApiError && cause.status !== 0) {
+      if (cause instanceof StudioApiError && cause.status !== 0 && cause.code !== 'STORAGE_CHANGED') {
         setPending(null);
-        if (cause.status === 409) {try {const latest = await studioApi.open(base.id); if (projectRef.current?.id === base.id) reconcile(latest);} catch { /* Original conflict remains visible. */ }}
+        if (cause.status === 409 && cause.code !== 'STORAGE_CHANGED') {try {const latest = await studioApi.open(base.id); if (mounted.current && projectRef.current?.id === base.id) reconcile(latest);} catch { /* Original conflict remains visible. */ }}
       }
       markFailure(cause); persist();
     } finally {if (token === operation.current) setBusy(false);}
@@ -298,7 +312,7 @@ export function useStudioEditor(isActive: boolean) {
     try {for (const file of files) {
       if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) || file.size > 20 * 1024 * 1024) {failures.push(`${file.name}: PNG·JPG·WebP·GIF, 파일당 20 MB 이하만 추가할 수 있습니다.`); continue;}
       try {current = await studioApi.addAsset(current, file); if (token !== operation.current) return; acceptProject(current, true); count++;}
-      catch (cause) {failures.push(`${file.name}: ${messageFor(cause)}`); if (cause instanceof StudioApiError && [0, 409].includes(cause.status)) {markFailure(cause); if (cause.status === 409) reconcile(await studioApi.open(base.id)); break;}}
+      catch (cause) {failures.push(`${file.name}: ${messageFor(cause)}`); if (cause instanceof StudioApiError && [0, 409].includes(cause.status)) {markFailure(cause); if (cause.status === 409 && cause.code !== 'STORAGE_CHANGED') reconcile(await studioApi.open(base.id)); break;}}
     } setStatus(`${count}개 파일을 보관했습니다.`); setError(failures.join('\n'));}
     catch (cause) {if (token === operation.current) markFailure(cause);} finally {if (token === operation.current) setBusy(false); if (assetInput.current) assetInput.current.value = '';}
   };
@@ -332,7 +346,7 @@ export function useStudioEditor(isActive: boolean) {
   const inspectorDisabled = busy || Boolean(remoteProject);
   const editingDisabled = inspectorDisabled || sourcePreview?.projectId !== project?.id || sourcePreview?.revision !== project?.revision;
   const asset = project?.assets.find((entry) => entry.id === selectedAsset);
-  const requestText = project ? ['vyvyd 포스터 메이커 프로젝트를 현재 AI 대화에서 작업해 주세요.', `프로젝트 ID: ${project.id}`, `저장된 수정 번호: ${project.revision}`, `프로젝트 이름: ${project.name}`, selectedLayer ? `선택한 레이어 ID: ${selectedLayer}` : '', aiRequest.trim() ? `요청: ${aiRequest.trim()}` : '요청: 이 프로젝트의 Remotion 소스를 작성하거나 수정해 주세요.', '먼저 vyvyd MCP에서 프로젝트와 소스, 파일, 편집 값을 읽어 주세요. expectedRevision을 확인하고 기존 직접 편집 값과 파일을 유지하세요.', dirty ? '브라우저에 미저장 설정·레이어 편집이 있으므로 저장본과 구분해 작업해 주세요.' : ''].filter(Boolean).join('\n') : '';
+  const requestText = project ? ['vyvyd 포스터 메이커 프로젝트를 현재 AI 대화에서 작업해 주세요.', baseDirectory ? `작업 폴더: ${baseDirectory}` : '', `프로젝트 ID: ${project.id}`, `저장된 수정 번호: ${project.revision}`, `프로젝트 이름: ${project.name}`, selectedLayer ? `선택한 레이어 ID: ${selectedLayer}` : '', aiRequest.trim() ? `요청: ${aiRequest.trim()}` : '요청: 이 프로젝트의 Remotion 소스를 작성하거나 수정해 주세요.', '먼저 vyvyd MCP에서 프로젝트와 소스, 파일, 편집 값을 읽어 주세요. expectedRevision을 확인하고 기존 직접 편집 값과 파일을 유지하세요.', dirty ? '브라우저에 미저장 설정·레이어 편집이 있으므로 저장본과 구분해 작업해 주세요.' : ''].filter(Boolean).join('\n') : '';
   const copyRequest = async () => {try {await navigator.clipboard.writeText(requestText); setCopyStatus('복사했습니다. MCP를 연결한 Codex 또는 Claude 대화에 붙여넣으세요.');} catch {setCopyStatus('복사 내용 보기에서 문구를 선택해 직접 복사하세요.');}};
   const keyboardShortcut = (event: KeyboardEvent<HTMLElement>) => {
     if (busy || remoteProject || !(event.ctrlKey || event.metaKey) || event.altKey) return;

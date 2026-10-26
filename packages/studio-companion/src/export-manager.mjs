@@ -38,6 +38,7 @@ export function createExportManager({store, runtime,
   let pumpPromise = null;
   let stopped = false;
   let running = null;
+  let initialized = false;
   const serial = (action) => {
     const result = mutation.then(action);
     mutation = result.catch(() => undefined);
@@ -126,7 +127,7 @@ export function createExportManager({store, runtime,
         if (active.has(raw.state)) await update(raw, {state: 'failed', message: '서비스가 중단되어 출력을 마치지 못했습니다. 같은 저장 버전으로 다시 시도할 수 있습니다.'});
       } catch { /* Incomplete or tampered records never become public jobs. */ }
     }
-  })();
+  })().finally(() => {initialized = true;});
   const getRecord = (projectId, jobId) => {
     const project = idFor(projectId, '프로젝트');
     const record = records.get(idFor(jobId, '출력'));
@@ -319,6 +320,7 @@ export function createExportManager({store, runtime,
       if (info.size !== record.result.size || await digestFile(target) !== record.resultHash) throw error('EXPORT_RESULT_CHANGED', '출력 파일이 변경되었습니다. 파일을 다시 출력해 주세요.', 422);
       return {path: target, size: info.size, mimeType: record.result.mimeType, filename: record.result.filename};
     });},
+    busy() {return !initialized || Boolean(pumpPromise || running) || [...records.values()].some((record) => active.has(record.state));},
     async settled() {await ready; await mutation; while (pumpPromise) {await pumpPromise; await mutation;}},
     async shutdown() {
       stopped = true;

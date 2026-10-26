@@ -1,12 +1,12 @@
 import type {ProjectDocument} from '../../../packages/studio-runtime/src/project-model.mjs';
-import {STUDIO_SERVICE_URL, StudioApiError} from './studioApi';
+import {studioFetch, StudioApiError} from './studioApi';
 
 const MAX_BYTES = 145 * 1024 * 1024;
 async function bundleRequest<T>(path: string, body: BodyInit, decode: (response: Response) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120000);
   try {
-    const response = await fetch(`${STUDIO_SERVICE_URL}${path}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body, signal: controller.signal});
+    const response = await studioFetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body, signal: controller.signal});
     if (!response.ok) {
       const payload = await response.json();
       throw new StudioApiError(payload.error?.message ?? '프로젝트 파일을 처리하지 못했습니다.', payload.error?.code ?? 'BUNDLE_FAILED', response.status);

@@ -1,5 +1,5 @@
 import type {ExportJob, ExportOptions} from '../../../packages/studio-runtime/src/export-model.mjs';
-import {STUDIO_SERVICE_URL, StudioApiError} from './studioApi';
+import {studioFetch, studioFileUrl, StudioApiError} from './studioApi';
 
 export type ExportStartRequest = {expectedRevision: number; requestId: string; options: ExportOptions};
 
@@ -10,7 +10,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${STUDIO_SERVICE_URL}${path}`, {...init, signal: controller.signal});
+    const response = await studioFetch(path, {...init, signal: controller.signal});
     const payload = await response.json();
     if (!response.ok) throw new StudioApiError(payload.error?.message ?? '출력 요청을 처리하지 못했습니다.', payload.error?.code ?? 'EXPORT_REQUEST_FAILED', response.status);
     return payload as T;
@@ -23,7 +23,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const studioExportApi = {
-  fileUrl: (projectId: string, jobId: string) => `${STUDIO_SERVICE_URL}${pathFor(projectId, jobId)}/file`,
+  fileUrl: (projectId: string, jobId: string) => studioFileUrl(`${pathFor(projectId, jobId)}/file`),
   list: (projectId: string) => request<ExportJob[]>(pathFor(projectId)),
   open: (projectId: string, jobId: string) => request<ExportJob>(pathFor(projectId, jobId)),
   start: (projectId: string, body: ExportStartRequest) => request<ExportJob>(pathFor(projectId), {method: 'POST', ...json(body)}),
@@ -34,7 +34,7 @@ export const studioExportApi = {
     const timeout = setTimeout(() => controller.abort(), 120000);
     try {
       // Construct the endpoint locally: result.downloadUrl is only metadata.
-      const response = await fetch(`${STUDIO_SERVICE_URL}${pathFor(projectId, jobId)}/file`, {signal: controller.signal});
+      const response = await studioFetch(`${pathFor(projectId, jobId)}/file`, {signal: controller.signal});
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
         throw new StudioApiError(payload?.error?.message ?? '출력 파일을 읽지 못했습니다.', payload?.error?.code ?? 'EXPORT_FILE_FAILED', response.status);

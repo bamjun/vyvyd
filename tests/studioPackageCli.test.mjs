@@ -6,6 +6,7 @@ import path from 'node:path';
 import {test} from 'node:test';
 import {getStudioDataPaths, parseStudioPort, runCli, validateExactOrigin, validateServiceUrl} from '../packages/studio-companion/src/cli-main.mjs';
 import {getCodexConfigPath, installCodexConfig, readCodexConfigStatus, studioConfigSections, updateCodexConfig} from '../packages/studio-companion/src/cli-config.mjs';
+import {readStorageSettings, saveStorageSettings} from '../packages/studio-companion/src/storage-settings.mjs';
 
 const capture = () => {
   let text = '';
@@ -82,19 +83,23 @@ test('start passes persistent paths and custom origin while binding only to loop
   });
   assert.equal(result, 0);
   assert.deepEqual(listening, {port: 4567, host: '127.0.0.1'});
-  assert.deepEqual(serverOptions, {dataDir: '/persistent/projects', allowedOrigins: ['https://studio.example.test']});
+  assert.equal(serverOptions.dataDir, '/persistent/projects');
+  assert.deepEqual(serverOptions.allowedOrigins, ['https://studio.example.test']);
+  assert.equal(serverOptions.storageSettings.persistent, true);
+  assert.equal(typeof serverOptions.storageSettings.save, 'function');
   assert.match(stdout.read(), /http:\/\/127\.0\.0\.1:4567/);
   processImpl.emit('SIGTERM');
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(stopped, true);
 });
 
-test('start explains occupied ports and shuts down pending export work', async () => {
+test('start explains occupied ports and shuts down pending export work', async (t) => {
+  const directory = await fixture(t);
   const server = new EventEmitter();
   server.listen = () => queueMicrotask(() => server.emit('error', Object.assign(new Error('listen failed'), {code: 'EADDRINUSE'})));
   let stopped = false;
   server.studio = {exports: {shutdown: async () => {stopped = true;}}};
-  await assert.rejects(() => runCli(['start'], {env: {}, createStudioServer: () => server}), /Port 4180 is already in use/);
+  await assert.rejects(() => runCli(['start'], {env: {}, storageSettingsPath: path.join(directory, 'settings.json'), createStudioServer: () => server}), /Port 4180 is already in use/);
   assert.equal(stopped, true);
 });
 
@@ -204,7 +209,7 @@ test('doctor verifies the service identity and reports missing setup without lea
   const stdout = capture();
   await writeFile(path.join(directory, 'config.toml'), 'secret = "do-not-print"\n');
   let requested;
-  const context = {env: {CODEX_HOME: directory}, stdout, processImpl: {versions: {node: '22.16.0'}},
+  const context = {env: {CODEX_HOME: directory}, stdout, storageSettingsPath: path.join(directory, 'settings.json'), processImpl: {versions: {node: '22.16.0'}},
     getBrowserExecutable: () => '/browser/chrome', fetchImpl: async (url) => {requested = url; return {ok: true, json: async () => ({service: 'foreign', status: 'ok', protocolVersion: 2})};}};
   assert.equal(await runCli(['doctor'], context), 1);
   assert.equal(requested, 'http://127.0.0.1:4180/health');
@@ -216,4 +221,53 @@ test('doctor verifies the service identity and reports missing setup without lea
   const compatibleService = async () => ({ok: true, json: async () => ({service: 'vyvyd-studio', status: 'ok', protocolVersion: 2})});
   assert.equal(await runCli(['doctor'], {...context, fetchImpl: compatibleService, processImpl: {versions: {node: '22.13.9'}}}), 1);
   assert.equal(await runCli(['doctor'], {...context, fetchImpl: compatibleService, processImpl: {versions: {node: '24.0.0'}}}), 0);
+});
+
+test('website folder choice is saved outside the workspace and reused after a plain start', async (t) => {
+  const directory = await fixture(t);
+  const storageSettingsPath = path.join(directory, 'preferences', 'settings.json');
+  const selected = path.join(directory, 'chosen-workspace');
+  const optionsSeen = [];
+  const start = (args = []) => runCli(['start', ...args], {
+    env: {}, homeDirectory: directory, storageSettingsPath, stdout: capture(), processImpl: new EventEmitter(),
+    createStudioServer: (options) => {
+      optionsSeen.push(options);
+      const server = new EventEmitter();
+      server.listen = (_port, _host, ready) => ready();
+      return server;
+    },
+  });
+  await start();
+  assert.equal(await readStorageSettings(storageSettingsPath), null, 'starting the service does not write preferences');
+  await optionsSeen[0].storageSettings.save(selected);
+  assert.equal((await readStorageSettings(storageSettingsPath)).baseDirectory, selected);
+  await start();
+  assert.equal(optionsSeen[1].dataDir, path.join(selected, 'projects'));
+  await start(['--data-dir', path.join(directory, 'temporary-override')]);
+  assert.equal(optionsSeen[2].dataDir, path.join(directory, 'temporary-override', 'projects'));
+  assert.equal((await readStorageSettings(storageSettingsPath)).baseDirectory, selected, 'explicit startup override is temporary');
+});
+
+test('legacy environment override wins over saved choice and corrupt preferences fail clearly', async (t) => {
+  const directory = await fixture(t);
+  const storageSettingsPath = path.join(directory, 'settings.json');
+  await saveStorageSettings(storageSettingsPath, path.join(directory, 'saved'));
+  let optionsSeen;
+  const context = {
+    env: {STUDIO_DATA_DIR: path.join(directory, 'legacy-projects')}, storageSettingsPath,
+    stdout: capture(), processImpl: new EventEmitter(),
+    createStudioServer: (options) => {
+      optionsSeen = options;
+      const server = new EventEmitter();
+      server.listen = (_port, _host, ready) => ready();
+      return server;
+    },
+  };
+  await runCli(['start'], context);
+  assert.equal(optionsSeen.dataDir, context.env.STUDIO_DATA_DIR);
+  await writeFile(storageSettingsPath, '{broken');
+  await assert.rejects(() => runCli(['start'], {...context, env: {}}), /storage settings.*--data-dir/);
+  await runCli(['start', '--data-dir', path.join(directory, 'recovery')], {...context, env: {}});
+  assert.equal(optionsSeen.dataDir, path.join(directory, 'recovery', 'projects'));
+  assert.equal(await readFile(storageSettingsPath, 'utf8'), '{broken', 'explicit startup does not overwrite damaged preferences');
 });
