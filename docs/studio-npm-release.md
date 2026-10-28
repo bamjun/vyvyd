@@ -63,3 +63,16 @@ Cloudflare Pages의 기존 `vyvyd` 프로젝트와 `main` production 브랜치�
 이 배포는 로컬 companion을 npm으로 제공하는 방식입니다. 저장·미리보기·출력은 사용자가 실행한 서비스가 처리합니다. 내장 브라우저에서는 로컬 서비스 연결이 되지 않아 연결 안내 화면을 확인했으며, HTTPS 사이트와 사용자 로컬 서비스의 연결에는 브라우저의 로컬 네트워크 접근 허용이 필요합니다.
 
 자세한 사용자 명령과 저장 경로는 [패키지 사용 안내](../packages/studio-companion/README.md)를 참고하세요.
+
+## 2026-10-29: 포스터 크기·회전 핸들 업데이트
+
+배포 대상은 `@bamjun/vyvyd-studio@0.1.2`입니다. 사이트에 크기·회전 핸들, 캔버스 정렬, 이동 가이드 스냅을 추가하고 companion에 레이어 변환 측정 정보를 추가했습니다. 미리보기 프로토콜을 5로 올려 이전 캐시를 다시 컴파일하며, 프로젝트 데이터 형식은 그대로 유지합니다.
+
+- 전체 테스트: 392개 통과, 4개 건너뜀, 실패 없음.
+- `npm run lint`, `npm run build`: 통과.
+- 패키지 파일: `artifacts/studio-package/bamjun-vyvyd-studio-0.1.2.tgz`.
+- 크기: 63,564바이트 / 압축 해제 후 224,293바이트, 포함 파일 27개.
+- SHA-1: `1bb1b52a90b0f1f87027b27fad0e299b06a170d1`.
+- 무결성: `sha512-wpwNmgUDd/RZtT2TdOzXjfdzK3yMksu6QTNqCkKoG3AlfF5JZ3Y0UxbSv8F+UrHt2WgsJ4icmrkZEqOWyZq6iA==`.
+
+기존 설치는 새 패키지를 설치한 뒤 로컬 서비스를 다시 시작하고, 프로젝트에서 **소스 다시 컴파일**을 누릅니다. npm 공개 여부는 [공개 패키지 페이지](https://www.npmjs.com/package/@bamjun/vyvyd-studio)에서 버전을 확인할 수 있습니다.

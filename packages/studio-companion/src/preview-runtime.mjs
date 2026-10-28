@@ -14,6 +14,8 @@ import {createBrowserDependencyPolicy, createProjectBoundaryPlugin} from './brow
 import {BROWSER_NOT_FOUND_MESSAGE, getBrowserExecutable} from './browser-executable.mjs';
 
 const repoRoot = path.resolve(fileURLToPath(new URL('../../../', import.meta.url)));
+// Rebuild cached players that predate local-box/origin data for canvas handles.
+export const PREVIEW_PROTOCOL_VERSION = 5;
 let browserDependencies;
 const defaultParentOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173', 'https://vyvyd.pages.dev'];
 const normalizedParentOrigins = (origins) => {
@@ -217,13 +219,13 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
       }
       const inputProps = {composition: project.composition, backgroundColor: project.edits.backgroundColor,
         layers: project.edits.layers, assets: project.assets, assetUrls};
-      const snapshot = {previewId, projectId: project.id, revision: project.revision, previewProtocolVersion: 4, layerMetadata,
+      const snapshot = {previewId, projectId: project.id, revision: project.revision, previewProtocolVersion: PREVIEW_PROTOCOL_VERSION, layerMetadata,
         composition: project.composition, inputProps, frame: Math.max(0, Math.min(project.composition.durationInFrames - 1, Math.floor(frame))),
         parentOrigins: trustedParents};
       await writeFile(path.join(directory, 'preview-entry.tsx'), createPreviewPlayerSource());
       await writeFile(path.join(directory, 'snapshot.json'), JSON.stringify(snapshot));
       await writeFile(path.join(directory, 'player.html'), createPreviewPlayerHtml(snapshot));
-      const record = {previewId, projectId: project.id, revision: project.revision, directory, previewProtocolVersion: 4,
+      const record = {previewId, projectId: project.id, revision: project.revision, directory, previewProtocolVersion: PREVIEW_PROTOCOL_VERSION,
         inputProps, composition: project.composition, layerMetadata, parentOrigins: trustedParents, state: 'preparing'};
       versions.set(previewId, record);
       stage = 'compile';
@@ -311,7 +313,7 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
     for (const item of await readdir(root, {withFileTypes: true})) {
       if (!item.isDirectory() || !UUID.test(item.name)) continue;
       const record = await loadVersion(item.name);
-      if (!record || record.previewProtocolVersion !== 4 || record.state !== 'ready' || record.projectId !== project.id
+      if (!record || record.previewProtocolVersion !== PREVIEW_PROTOCOL_VERSION || record.state !== 'ready' || record.projectId !== project.id
         || record.revision !== project.revision || record.sourceHash !== sourceHash) continue;
       // A saved player embeds its exact parent allowlist. Reusing it after the
       // local service's configured HTTPS origin changes would reject the new

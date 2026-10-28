@@ -1,6 +1,6 @@
 {
   "name": "@bamjun/vyvyd-studio",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local poster projects, Remotion previews and exports, and MCP tools for the vyvyd Poster Maker",
   "type": "module",
   "bin": {

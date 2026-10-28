@@ -63,6 +63,54 @@ export function readLayerTransform(style) {
   return {basis, supported: layerBasisIsInvertible(basis)};
 }
 
+// Computed transform-origin is pixel-based. Preserve authored percentages and
+// fixed offsets separately so changing a box's size does not move its anchor.
+export function readLayerOrigin(element, style, width, height) {
+  const token = (text, axis) => {
+    if (text === 'center') return {ratio: 0.5, offset: 0};
+    if (text === (axis === 'x' ? 'left' : 'top')) return {ratio: 0, offset: 0};
+    if (text === (axis === 'x' ? 'right' : 'bottom')) return {ratio: 1, offset: 0};
+    let match = /^([+-]?(?:\d+\.?\d*|\.\d+))(px|%)$/.exec(text);
+    if (match) return match[2] === '%' ? {ratio: Number(match[1]) / 100, offset: 0} : {ratio: 0, offset: Number(match[1])};
+    if (text === '0') return {ratio: 0, offset: 0};
+    match = /^calc\(\s*([+-]?(?:\d+\.?\d*|\.\d+))%\s*([+-])\s*((?:\d+\.?\d*|\.\d+))px\s*\)$/.exec(text);
+    return match ? {ratio: Number(match[1]) / 100, offset: Number(match[3]) * (match[2] === '-' ? -1 : 1)} : null;
+  };
+  const parse = (text) => {
+    const parts = String(text).trim().match(/calc\([^)]*\)|\S+/g) ?? [];
+    if (parts.length === 3 && ['0', '0px'].includes(parts[2])) parts.pop();
+    if (parts.length === 1) {
+      if (['top', 'bottom'].includes(parts[0])) parts.unshift('center');
+      else parts.push('center');
+    }
+    if (parts.length !== 2) return null;
+    if (['top', 'bottom'].includes(parts[0]) || ['left', 'right'].includes(parts[1])) parts.reverse();
+    const x = token(parts[0], 'x'), y = token(parts[1], 'y');
+    return x && y ? {ratio: {x: x.ratio, y: y.ratio}, offset: {x: x.offset, y: y.offset}} : null;
+  };
+  const computed = parse(style.transformOrigin || '50% 50%');
+  if (!computed) return null;
+  const actual = {x: computed.ratio.x * width + computed.offset.x, y: computed.ratio.y * height + computed.offset.y};
+  const authored = String(element.style?.transformOrigin || '').trim();
+  const parsed = authored ? parse(authored) : Math.abs(actual.x - width / 2) < 0.01 && Math.abs(actual.y - height / 2) < 0.01
+    ? {ratio: {x: 0.5, y: 0.5}, offset: {x: 0, y: 0}} : null;
+  const reliable = parsed && Math.abs(parsed.ratio.x * width + parsed.offset.x - actual.x) < 0.51
+    && Math.abs(parsed.ratio.y * height + parsed.offset.y - actual.y) < 0.51;
+  return {originRatio: reliable ? parsed.ratio : {x: 0, y: 0}, originOffset: reliable ? parsed.offset : actual, reliable: Boolean(reliable)};
+}
+
+export function readLayerBoxSize(element, style) {
+  const edge = (name) => Number.parseFloat(style[name]) || 0;
+  const dimension = (axis, fallback) => {
+    const value = Number.parseFloat(style[axis]);
+    if (!Number.isFinite(value)) return Number(fallback);
+    if (style.boxSizing === 'border-box') return value;
+    return axis === 'width' ? value + edge('paddingLeft') + edge('paddingRight') + edge('borderLeftWidth') + edge('borderRightWidth')
+      : value + edge('paddingTop') + edge('paddingBottom') + edge('borderTopWidth') + edge('borderBottomWidth');
+  };
+  return {width: dimension('width', element.offsetWidth), height: dimension('height', element.offsetHeight)};
+}
+
 export function measureDomLayers(stage, composition, registry, edits, parentToken) {
   const rect = stage.getBoundingClientRect();
   if (![rect.left, rect.top, rect.width, rect.height, composition.width, composition.height].every(Number.isFinite)
@@ -86,7 +134,8 @@ export function measureDomLayers(stage, composition, registry, edits, parentToke
       || bounds.width <= 0 || bounds.height <= 0) continue;
     let parentBasis = {a: 1, b: 0, c: 0, d: 1};
     const ownStyle = getComputedStyle(element);
-    let movable = readLayerTransform(ownStyle).supported
+    const ownTransform = readLayerTransform(ownStyle);
+    let movable = ownTransform.supported
       && (!ownStyle.zoom || ['normal', '1', '100%'].includes(String(ownStyle.zoom)));
     let groupId = '__root__';
     let foundGroup = false;
@@ -107,14 +156,37 @@ export function measureDomLayers(stage, composition, registry, edits, parentToke
       if (current.namespaceURI === 'http://www.w3.org/2000/svg') movable = false;
     }
     if (!layerBasisIsInvertible(parentBasis)) movable = false;
-    layers.push({id, x: (bounds.left - rect.left) * scaleX, y: (bounds.top - rect.top) * scaleY,
+    const geometry = {id, x: (bounds.left - rect.left) * scaleX, y: (bounds.top - rect.top) * scaleY,
       width: bounds.width * scaleX, height: bounds.height * scaleY, groupId,
-      siblingGroupId: parentToken(element.parentElement ?? stage), movable, locked, parentBasis});
+      siblingGroupId: parentToken(element.parentElement ?? stage), movable, locked, parentBasis};
+    const size = readLayerBoxSize(element, ownStyle);
+    const origin = readLayerOrigin(element, ownStyle, size.width, size.height);
+    if (movable && origin && [size.width, size.height].every((value) => Number.isFinite(value) && value > 0)) {
+      const total = multiplyLayerBasis(parentBasis, ownTransform.basis);
+      const expectedWidth = Math.abs(total.a) * size.width + Math.abs(total.c) * size.height;
+      const expectedHeight = Math.abs(total.b) * size.width + Math.abs(total.d) * size.height;
+      if (Math.abs(expectedWidth - geometry.width) <= 0.51 && Math.abs(expectedHeight - geometry.height) <= 0.51) {
+        const {a, b, c, d} = ownTransform.basis;
+        const inlineTransform = String(element.style?.transform || '');
+        const matrix = /^matrix\(([^)]+)\)$/.exec(ownStyle.transform || '');
+        const translation = matrix?.[1].split(',').map(Number).slice(4) ?? [0, 0];
+        const fixedTranslation = !translation.some((value) => Math.abs(value) > 0.001)
+          || inlineTransform && !/[%]|var\(|calc\(/.test(inlineTransform);
+        const individualTranslation = String(ownStyle.translate || 'none');
+        const safeTranslation = fixedTranslation && !/[%]|var\(|calc\(/.test(individualTranslation);
+        const norm = Math.max(1, a * a + b * b, c * c + d * d);
+        const conformal = a * d - b * c > 0 && Math.abs(a * c + b * d) <= 1e-6 * norm
+          && Math.abs(a * a + b * b - c * c - d * d) <= 1e-6 * norm;
+        geometry.transform = {basis: ownTransform.basis, ...size, originRatio: origin.originRatio, originOffset: origin.originOffset,
+          resizable: Boolean(origin.reliable && safeTranslation), rotatable: conformal && !translation.some((value) => Math.abs(value) > 0.001)};
+      }
+    }
+    layers.push(geometry);
   }
   return {layers, viewport: {x: rect.left, y: rect.top, width: rect.width, height: rect.height}, nodes: [...nodes]};
 }
 
 export function createDomLayerGeometrySource() {
-  return [multiplyLayerBasis, layerBasisIsInvertible, readLayerTransform, measureDomLayers]
+  return [multiplyLayerBasis, layerBasisIsInvertible, readLayerTransform, readLayerOrigin, readLayerBoxSize, measureDomLayers]
     .map((implementation) => implementation.toString()).join('\n\n');
 }

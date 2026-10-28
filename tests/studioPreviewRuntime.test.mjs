@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createProjectDocument} from '../packages/studio-runtime/src/project-model.mjs';
-import {createPreviewRuntime, getPreviewValidationFrames, StudioPreviewError} from '../packages/studio-companion/src/preview-runtime.mjs';
+import {createPreviewRuntime, getPreviewValidationFrames, PREVIEW_PROTOCOL_VERSION, StudioPreviewError} from '../packages/studio-companion/src/preview-runtime.mjs';
 import {createPreviewPlayerHtml, createPreviewPlayerSource} from '../packages/studio-companion/src/preview-player-source.mjs';
 
 const temporary = async (t) => {
@@ -83,7 +83,7 @@ test('restart restore matches source and all editable props rather than revision
   const root = await temporary(t);
   const project = createProjectDocument({name: 'Restore preview',
     composition: {width: 160, height: 90, fps: 30, durationInFrames: 4}});
-  const save = async (document, createdAt, previewProtocolVersion = 4) => {
+  const save = async (document, createdAt, previewProtocolVersion = PREVIEW_PROTOCOL_VERSION) => {
     const previewId = randomUUID();
     const directory = path.join(root, previewId);
     await mkdir(path.join(directory, 'render'), {recursive: true});
@@ -100,7 +100,8 @@ test('restart restore matches source and all editable props rather than revision
   };
   await save(project, '2026-10-01T01:00:00.000Z');
   const newestMatching = await save(project, '2026-10-01T02:00:00.000Z');
-  await save(project, '2026-10-01T05:00:00.000Z', 3);
+  // The previous player has no transform-frame metadata and must be rebuilt.
+  await save(project, '2026-10-01T05:00:00.000Z', PREVIEW_PROTOCOL_VERSION - 1);
   const wrongSource = structuredClone(project);
   wrongSource.source.files['src/Root.tsx'] += '\n// unsaved draft';
   await save(wrongSource, '2026-10-01T03:00:00.000Z');

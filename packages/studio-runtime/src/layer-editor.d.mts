@@ -14,9 +14,15 @@ export type StudioLayerDefinition = {
   defaults: Partial<StudioLayerValues>;
 };
 export type ParentBasis = {a: number; b: number; c: number; d: number};
+export type LayerTransformGeometry = {
+  basis: ParentBasis; width: number; height: number;
+  originRatio: {x: number; y: number}; originOffset: {x: number; y: number};
+  resizable?: boolean; rotatable?: boolean;
+};
 export type LayerGeometry = {
   id: string; x: number; y: number; width: number; height: number;
   groupId: string | null; siblingGroupId?: string; movable: boolean; locked?: boolean; parentBasis: ParentBasis;
+  transform?: LayerTransformGeometry;
 };
 export function readStudioLayerRegistry(project: ProjectDocument): StudioLayerDefinition[];
 export function getEffectiveLayerValues(layer: StudioLayerDefinition, edits: Record<string, unknown>): StudioLayerValues;

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createProjectDocument} from '../packages/studio-runtime/src/project-model.mjs';
-import {createPreviewRuntime} from '../packages/studio-companion/src/preview-runtime.mjs';
+import {createPreviewRuntime, PREVIEW_PROTOCOL_VERSION} from '../packages/studio-companion/src/preview-runtime.mjs';
 import {createWorkerPreviewRuntime} from '../packages/studio-companion/src/worker-preview-runtime.mjs';
 import {createStudioServer} from '../packages/studio-companion/src/server.mjs';
 
@@ -27,7 +27,7 @@ const snapshot = async (root, project, parentOrigins, legacy = false) => {
   await writeFile(path.join(directory, 'player.html'), '<html>isolated player</html>');
   await writeFile(path.join(directory, 'render', 'player.js'), '/* player */');
   const record = {previewId, projectId: project.id, revision: project.revision,
-    state: 'ready', previewProtocolVersion: 4, createdAt: new Date().toISOString(),
+    state: 'ready', previewProtocolVersion: PREVIEW_PROTOCOL_VERSION, createdAt: new Date().toISOString(),
     sourceHash: createHash('sha256').update(JSON.stringify(project.source)).digest('hex'),
     inputProps: {composition: project.composition, backgroundColor: project.edits.backgroundColor,
       layers: project.edits.layers, assets: project.assets, assetUrls: {}},

@@ -5,6 +5,7 @@ import {
   type LayerGeometry, type StudioLayerDefinition, type StudioLayerProperty,
 } from '../../../packages/studio-runtime/src/layer-editor.mjs';
 import type {ProjectAsset} from '../../../packages/studio-runtime/src/project-model.mjs';
+import {getLayerAlignmentPatch, type LayerAlignment} from '../../../packages/studio-runtime/src/layer-transform.mjs';
 
 export type StudioLayersPanelProps = {
   registry: StudioLayerDefinition[];
@@ -16,6 +17,8 @@ export type StudioLayersPanelProps = {
   disabled: boolean;
   measured?: LayerGeometry[];
   onReorder: (direction: 'up' | 'down') => void;
+  composition?: {width: number; height: number};
+  onAlign: (alignment: LayerAlignment) => void;
 };
 
 const inputClass = 'mt-1 w-full rounded-lg border border-white/10 bg-[#121318] px-3 py-2 text-sm text-white focus:border-purple-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-40';
@@ -137,7 +140,7 @@ function LayerProperties({layer, edits, assets, disabled, inheritedLocked, onCha
   </div>;
 }
 
-export default function StudioLayersPanel({registry, edits, assets, selectedId, onSelect, onChange, disabled, measured = [], onReorder}: StudioLayersPanelProps) {
+export default function StudioLayersPanel({registry, edits, assets, selectedId, onSelect, onChange, disabled, measured = [], onReorder, composition, onAlign}: StudioLayersPanelProps) {
   const titleId = useId();
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const selected = registry.find((layer) => layer.id === selectedId);
@@ -153,6 +156,15 @@ export default function StudioLayersPanel({registry, edits, assets, selectedId, 
     if (id) {onSelect(id); buttons.current.get(id)?.focus();}
   };
   const canReorder = (direction: 'up' | 'down') => Boolean(selected && !disabled && getLayerReorderPatch(registry, edits, measured, selected.id, direction));
+  const selectedGeometry = measured.find((layer) => layer.id === selectedId);
+  const canAlign = (alignment: LayerAlignment) => Boolean(selected && selectedGeometry && composition && !disabled
+    && getLayerAlignmentPatch(selected, edits, selectedGeometry, composition, alignment));
+  const alignments: {value: LayerAlignment; label: string}[] = [
+    {value: 'left', label: '왼쪽 맞춤'}, {value: 'right', label: '오른쪽 맞춤'},
+    {value: 'centerX', label: '가로 중앙 맞춤'}, {value: 'centerY', label: '세로 중앙 맞춤'},
+    {value: 'top', label: '위쪽 맞춤'}, {value: 'bottom', label: '아래쪽 맞춤'},
+    {value: 'center', label: '캔버스 중앙 맞춤'},
+  ];
   return <section aria-labelledby={titleId} className="rounded-xl border border-white/10 bg-[#1a1c23] p-4">
     <div className="mb-3 flex items-center justify-between gap-2"><h2 id={titleId} className="text-sm font-medium text-white">레이어 편집</h2><span className="text-xs text-gray-500">{registry.length}개</span></div>
     {!registry.length ? <p className="text-xs leading-relaxed text-gray-400">직접 편집할 레이어가 없습니다. MCP를 연결한 AI에 편집할 요소를 등록해 달라고 요청하세요.</p> : <>
@@ -169,6 +181,12 @@ export default function StudioLayersPanel({registry, edits, assets, selectedId, 
         })}
       </ul>
       {selected ? <>
+        <div className="mt-4 space-y-2" role="group" aria-label="캔버스에 레이어 정렬">
+          <h3 className="text-xs font-medium text-gray-300">캔버스에 정렬</h3>
+          <div className="grid grid-cols-2 gap-2">{alignments.map(({value, label}) => <button key={value} type="button" aria-label={label}
+            className={`${buttonClass} ${value === 'center' ? 'col-span-2' : ''}`} disabled={!canAlign(value)} onClick={() => onAlign(value)}>{label}</button>)}</div>
+          <p className="text-[11px] text-gray-500">현재 프레임에 보이는 영역을 기준으로 맞춥니다.</p>
+        </div>
         {selected.editable.includes('zIndex') && <div className="mt-3 flex gap-2">
           <button type="button" aria-label="레이어 앞으로" className={buttonClass} disabled={!canReorder('up')} onClick={() => onReorder('up')}><ArrowUp size={13} aria-hidden="true" />앞으로</button>
           <button type="button" aria-label="레이어 뒤로" className={buttonClass} disabled={!canReorder('down')} onClick={() => onReorder('down')}><ArrowDown size={13} aria-hidden="true" />뒤로</button>

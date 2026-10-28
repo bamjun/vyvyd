@@ -4,6 +4,7 @@ import type {ProjectDocument} from '../../../packages/studio-runtime/src/project
 import {beginEditHistory, cancelEditHistory, createEditHistory, endEditHistory, recordEditHistory, redoEditHistory, undoEditHistory, type EditHistory} from '../../../packages/studio-runtime/src/edit-history.mjs';
 import {parseStoredStudioDraft, rebaseStudioDraft, studioDraftForProject, type StudioDraftSnapshot} from '../../../packages/studio-runtime/src/project-draft.mjs';
 import {getLayerReorderPatch, readStudioLayerRegistry, type LayerGeometry} from '../../../packages/studio-runtime/src/layer-editor.mjs';
+import {getLayerAlignmentPatch, type LayerAlignment} from '../../../packages/studio-runtime/src/layer-transform.mjs';
 import {confirmStudioWrite} from '../../../packages/studio-runtime/src/write-confirmation.mjs';
 import {initialFields, settingsFor, type Fields} from './studioEditorSettings';
 import {studioApi, StudioApiError, type ProjectHistory, type ProjectRuntimeStatus, type ProjectSummary} from './studioApi';
@@ -267,6 +268,15 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
   }, [replaceEditor]);
   const registry = useMemo(() => {try {return project ? readStudioLayerRegistry(project) : [];} catch {return [];}}, [project]);
   const reorderLayer = (direction: 'up' | 'down') => {const patch = getLayerReorderPatch(registry, editorRef.current.present.layers, layerGeometry, selectedLayer, direction); if (!patch) return; beginInteraction(); for (const [id, values] of Object.entries(patch)) changeLayer(id, values); endInteraction();};
+  const alignLayer = (alignment: LayerAlignment) => {
+    const selected = registry.find((layer) => layer.id === selectedLayer);
+    const measured = layerGeometry.find((layer) => layer.id === selectedLayer);
+    if (!selected || !measured || !previewComposition || editingDisabled) return;
+    const patch = getLayerAlignmentPatch(selected, editorRef.current.present.layers, measured, previewComposition, alignment);
+    if (!patch) return;
+    beginInteraction(); changeLayer(selected.id, patch); endInteraction();
+    setLayerNotice('현재 프레임의 표시 영역을 기준으로 정렬했습니다. 저장하면 프로젝트에 반영됩니다.');
+  };
   const measureLayers = useCallback((values: LayerGeometry[]) => setLayerGeometry(values), []);
   const save = async (retry = false) => {
     commitInteraction(); const base = projectRef.current; if (!base || !connectedRef.current) return;
@@ -356,7 +366,7 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
     else if (event.key.toLowerCase() === 'y') {event.preventDefault(); redo();}
   };
   return {projects, project, fields, setFields, newFields, setNewFields, creating, setCreating, connected, busy, status, error, setError, selectedAsset, setSelectedAsset, frame, runtimeStatus, remoteProject, sourcePreview, aiRequest, setAiRequest, copyStatus, setCopyStatus, layerDraft, selectedLayer, layerGeometry, editMode, setEditMode, layerNotice, draftNotice, dirty, registry, previewComposition, previewEdits, inspectorDisabled, editingDisabled, asset, requestText, pendingWrite, recovery, versionHistory, selectedVersion,
-    playerRef, assetInput, connect, openProject: activate, reopenProject: () => project && activate(project.id, true), createProject, importProject, startCreating, save, addAssets, compile, copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer, adoptRemote,
+    playerRef, assetInput, connect, openProject: activate, reopenProject: () => project && activate(project.id, true), createProject, importProject, startCreating, save, addAssets, compile, copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer, alignLayer, adoptRemote,
     undo, redo, canUndo: editor.past.length > 0 || editor.transaction !== null, canRedo: editor.future.length > 0, beginInteraction, endInteraction, registerCancel, keyboardShortcut, refreshHistory, selectVersion, restoreVersion, restoreRecovery,
     hasDraft: (id: string) => {const session = sessions.current.get(id); return Boolean(session && !same(session.history.present, studioDraftForProject(session.base)) || read(draftKey(id), true));}};
 }

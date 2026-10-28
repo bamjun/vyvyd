@@ -1,0 +1,11 @@
+import type {LayerGeometry, ParentBasis, StudioLayerDefinition, StudioLayerValues} from './layer-editor.mjs';
+export type LayerPoint = {x: number; y: number};
+export type LayerResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+export type LayerAlignment = 'left' | 'centerX' | 'right' | 'top' | 'centerY' | 'bottom' | 'center';
+export type LayerGuide = {axis: 'x' | 'y'; value: number};
+export function getLayerTransformFrame(geometry: LayerGeometry): {points: [LayerPoint, LayerPoint, LayerPoint, LayerPoint]; origin: LayerPoint; basis: ParentBasis} | null;
+export function resizeLayerFromDelta(layer: StudioLayerDefinition, edits: Record<string, unknown>, geometry: LayerGeometry, handle: LayerResizeHandle, delta: LayerPoint, options?: {proportional?: boolean}): {x: number; y: number; width: number; height: number} | null;
+export function rotateLayerFromPointers(layer: StudioLayerDefinition, edits: Record<string, unknown>, geometry: LayerGeometry, start: LayerPoint, current: LayerPoint, options?: {snap?: boolean}): {rotation: number} | null;
+export function predictLayerGeometry(geometry: LayerGeometry, startValues: StudioLayerValues, patch: Partial<StudioLayerValues>): LayerGeometry | null;
+export function getLayerAlignmentPatch(layer: StudioLayerDefinition, edits: Record<string, unknown>, geometry: LayerGeometry, composition: {width: number; height: number}, alignment: LayerAlignment): {x: number; y: number} | null;
+export function snapLayerTranslation(geometry: LayerGeometry, delta: LayerPoint, composition: {width: number; height: number}, others: LayerGeometry[], options?: {thresholdX?: number; thresholdY?: number; bypass?: boolean}): {delta: LayerPoint; guides: LayerGuide[]};

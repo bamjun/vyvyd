@@ -4,6 +4,22 @@ import {STUDIO_SERVICE_URL} from './studioApi';
 import type {LayerGeometry, StudioLayerDefinition} from '../../../packages/studio-runtime/src/layer-editor.mjs';
 import StudioLayerOverlay from './StudioLayerOverlay';
 
+const measuredTransform = (value: unknown): LayerGeometry['transform'] => {
+  if (!value || typeof value !== 'object') return undefined;
+  const transform = value as Record<string, unknown>;
+  const basis = transform.basis as Record<string, unknown> | undefined;
+  const ratio = transform.originRatio as Record<string, unknown> | undefined;
+  const offset = transform.originOffset as Record<string, unknown> | undefined;
+  const finite = (number: unknown) => typeof number === 'number' && Number.isFinite(number) && Math.abs(number) <= 10000000;
+  if (!basis || !['a', 'b', 'c', 'd'].every((key) => finite(basis[key]))
+    || !ratio || !offset || ![ratio.x, ratio.y, offset.x, offset.y].every(finite)
+    || !finite(transform.width) || !finite(transform.height) || Number(transform.width) <= 0 || Number(transform.height) <= 0) return undefined;
+  return {basis: {a: Number(basis.a), b: Number(basis.b), c: Number(basis.c), d: Number(basis.d)},
+    width: Number(transform.width), height: Number(transform.height),
+    originRatio: {x: Number(ratio.x), y: Number(ratio.y)}, originOffset: {x: Number(offset.x), y: Number(offset.y)},
+    resizable: transform.resizable === true, rotatable: transform.rotatable === true};
+};
+
 type Props = {
   projectId: string;
   revision: number;
@@ -104,7 +120,8 @@ export default function StudioSourcePreview({projectId, revision, previewUrl, co
             groupId: typeof item.groupId === 'string' ? item.groupId : null,
             siblingGroupId: typeof item.siblingGroupId === 'string' ? item.siblingGroupId : undefined,
             locked: item.locked === true, movable: item.movable === true,
-            parentBasis: {a: Number(basis.a), b: Number(basis.b), c: Number(basis.c), d: Number(basis.d)}});
+            parentBasis: {a: Number(basis.a), b: Number(basis.b), c: Number(basis.c), d: Number(basis.d)},
+            transform: measuredTransform(item.transform)});
         }
         window.clearTimeout(timer);
         setReady(true); setFailure('');
@@ -137,6 +154,9 @@ export default function StudioSourcePreview({projectId, revision, previewUrl, co
       {ready && editMode && !failure && <StudioLayerOverlay key={`${projectId}-${revision}`} registry={registry} edits={edits.layers} geometry={geometry} geometryReady={geometryStamp?.token === syncToken && geometryStamp.frame === frame} composition={composition} selectedId={selectedLayerId} disabled={editingDisabled || !isActive} onSelect={onSelectLayer} onChange={onChangeLayer} onBeginInteraction={onBeginInteraction} onEndInteraction={onEndInteraction} onRegisterCancelInteraction={onRegisterCancelInteraction} />}
     </div>
     {failure && <p role="alert" className="mt-2 whitespace-pre-wrap text-xs text-amber-200">{failure}</p>}
-    {editMode && geometry.some((layer) => layer.id === selectedLayerId) && <p className="mt-2 text-[11px] text-gray-500">현재 프레임 표시 위치 {geometry.find((layer) => layer.id === selectedLayerId)!.x.toFixed(1)}, {geometry.find((layer) => layer.id === selectedLayerId)!.y.toFixed(1)} px · 이동은 레이어의 기준 위치에 적용됩니다.</p>}
+    {editMode && geometry.some((layer) => layer.id === selectedLayerId) && <div className="mt-2 space-y-1 text-[11px] text-gray-500">
+      <p>현재 프레임 표시 위치 {geometry.find((layer) => layer.id === selectedLayerId)!.x.toFixed(1)}, {geometry.find((layer) => layer.id === selectedLayerId)!.y.toFixed(1)} px</p>
+      <p>사각 핸들: 크기 · 원형 핸들: 회전 · Shift+드래그: 비율 유지/15° 회전 · Alt: 이동 스냅 해제 · Esc: 취소</p>
+    </div>}
   </div>;
 }
