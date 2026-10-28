@@ -19,6 +19,8 @@ import { useMediaReceiver, useMediaTransfer } from '@/hooks/useMediaTransfer';
 import { VideoOutputSettings } from './VideoOutputSettings';
 import { VideoOutputPreview } from './VideoOutputPreview';
 import { TargetSizeControl } from './TargetSizeControl';
+import { SettingsPresets } from './SettingsPresets';
+import { applyVideoPresetOutput, type VideoGifPresetSettings } from '@/lib/settingsPresets';
 import { optimizeToTargetSize, parseTargetSize } from '@/lib/targetSize';
 import type { VideoCrop } from '@/lib/videoGeometry';
 import {
@@ -101,6 +103,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const [targetEnabled, setTargetEnabled] = useState(false);
   const [targetValue, setTargetValue] = useState('1');
   const [targetUnit, setTargetUnit] = useState<'KB' | 'MB'>('MB');
+  const [defaultOutputPreset, setDefaultOutputPreset] = useState<VideoGifPresetSettings['output']>(null);
   const [isLoadingVideos, setIsLoadingVideos] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [progressMsg, setProgressMsg] = useState<string>('');
@@ -170,7 +173,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
         const video = await loadVideoMetadata(src);
         const metadata = {width: video.videoWidth, height: video.videoHeight, duration: video.duration};
         if (!metadata.width || !metadata.height || !Number.isFinite(metadata.duration) || metadata.duration <= 0) throw new Error('영상 크기 또는 재생 시간을 확인할 수 없습니다.');
-        return {id: crypto.randomUUID(), file, src, ...metadata, settings: createVideoSettings(metadata)};
+        return {id: crypto.randomUUID(), file, src, ...metadata, settings: applyVideoPresetOutput(createVideoSettings(metadata), defaultOutputPreset)};
       }));
       const failure = loaded.find((item) => item.status === 'rejected');
       if (failure?.status === 'rejected') throw failure.reason;
@@ -217,7 +220,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
             file,
             src,
             ...metadata,
-            settings: createVideoSettings(metadata),
+            settings: applyVideoPresetOutput(createVideoSettings(metadata), defaultOutputPreset),
           };
         }),
       );
@@ -280,6 +283,23 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
       ...item, settings: applyVideoOutputSettings(item.settings, settings),
     })));
     setSettingsNotice('모든 영상에 같은 출력 크기와 맞춤 방식을 적용했습니다. 자르기 영역과 구간은 그대로 유지됩니다.');
+  };
+
+  const applySettingsPreset = (preset: VideoGifPresetSettings) => {
+    if (isProcessing || loadingRef.current || activeRequestId !== null) return;
+    setFps(preset.fps); setDither(preset.dither);
+    setTargetEnabled(preset.targetSizeEnabled); setTargetValue(preset.targetSizeValue); setTargetUnit(preset.targetSizeUnit);
+    setDefaultOutputPreset(preset.output);
+    if (selectedVideo) {
+      setVideoItems((items) => items.map((item) => item.id === selectedVideo.id
+        ? { ...item, settings: applyVideoPresetOutput(item.settings, preset.output) } : item));
+      setSettingsNotice('공통 품질과 선택한 영상의 출력 설정을 불러왔습니다. 자르기 영역·변환 구간과 완료된 GIF는 유지됩니다. 다른 영상은 ‘모든 영상에 같은 출력 크기 적용’으로 변경할 수 있습니다.');
+    }
+  };
+
+  const presetSettings: VideoGifPresetSettings = {
+    fps, dither, targetSizeEnabled: targetEnabled, targetSizeValue: targetValue, targetSizeUnit: targetUnit,
+    output: selectedVideo ? { width: outputWidth, height: outputHeight, aspectLocked, fitMode } : defaultOutputPreset,
   };
 
   const convertToGif = async (targets: VideoItem[], preserveResults = false) => {
@@ -449,6 +469,10 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   return (
     <div className="space-y-8">
       {transferNotice?.target === 'video' && <p role="status" className="rounded-xl border border-purple-400/20 p-3 text-sm text-purple-200">{transferNotice.message}</p>}
+      <div className="space-y-2">
+        <SettingsPresets tool="video-gif" settings={presetSettings} onApply={applySettingsPreset} disabled={isProcessing || isLoadingVideos || activeRequestId !== null} />
+        <p className="text-xs leading-relaxed text-gray-500">FPS·디더링·목표 용량은 모든 영상에, 출력 크기는 선택한 영상과 이후 추가하는 영상에 적용합니다. 비율 잠금 시 저장한 가로 크기에 맞춰 세로 크기를 계산합니다. 파일이 없으면 이전에 불러온 출력 설정도 함께 저장합니다.</p>
+      </div>
       <input ref={fileInputRef} type="file" accept="video/mp4,video/*" multiple onChange={handleFileChange} disabled={isProcessing || isLoadingVideos} className="hidden" aria-label="동영상 파일 선택" />
       {!selectedVideo ? (
         <div className="flex flex-col items-center justify-center border-2 border-dashed border-purple-500/20 hover:border-purple-500/50 rounded-2xl p-12 bg-white/5 transition duration-300">

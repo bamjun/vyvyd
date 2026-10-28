@@ -11,6 +11,8 @@ import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
 import { useMediaTransfer } from '@/hooks/useMediaTransfer';
 import { getImagePaddingLayout, type ImagePaddingAlignment } from '@/lib/imagePadding';
+import { runImageBatch, selectImageBatchItems, type ImageBatchFileState, type ImageBatchMode } from '@/lib/imageBatch';
+import { ImageBatchStatus } from './ImageBatchStatus';
 
 interface ImagePaddingProps {
   onSuccess: (size: number) => void;
@@ -71,12 +73,15 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   const [progressIndex, setProgressIndex] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const [results, setResults] = useState<ImageResult[]>([]);
+  const [fileStates, setFileStates] = useState<Record<string, ImageBatchFileState>>({});
+  const [processingTotal, setProcessingTotal] = useState(0);
   const [errorMessage, setErrorMessage] = useState('');
   const [cancellationMessage, setCancellationMessage] = useState('');
   const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const imageUrlsRef = useRef<Set<string>>(new Set());
   const resultUrlsRef = useRef<Set<string>>(new Set());
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const busyRef = useRef(false);
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
   const { busy: isTransferring } = useMediaTransfer();
   const isBusy = isLoadingImages || isProcessing || activeRequestId !== null || isTransferring;
@@ -94,11 +99,12 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   };
 
   const reset = () => {
-    if (isBusy) return;
+    if (busyRef.current || isBusy) return;
     clearUrls(imageUrlsRef.current);
     clearUrls(resultUrlsRef.current);
     setImageItems([]);
     setResults([]);
+    setFileStates({});
     setProgressIndex(0);
     setProgressMessage('');
     setErrorMessage('');
@@ -108,27 +114,27 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   const clearResults = () => {
     clearUrls(resultUrlsRef.current);
     setResults([]);
+    setFileStates({});
     setCancellationMessage('');
   };
 
   const changeAlignment = (next: ImagePaddingAlignment) => {
     if (isBusy || next === alignment) return;
-    clearResults();
     setAlignment(next);
   };
 
   const changeBackground = (next: BackgroundMode) => {
     if (isBusy || next === background) return;
-    clearResults();
     setBackground(next);
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(event.target.files ?? []);
     const files = selectedFiles.filter((file) => SUPPORTED_TYPES.has(file.type));
-    if (files.length === 0 || isBusy) return;
+    if (files.length === 0 || busyRef.current || isBusy) return;
 
     reset();
+    busyRef.current = true;
     setIsLoadingImages(true);
     setErrorMessage('');
 
@@ -161,92 +167,95 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
       setImageItems([]);
       setErrorMessage('일부 이미지를 읽을 수 없습니다. 다시 선택해 주세요.');
     } finally {
+      busyRef.current = false;
       setIsLoadingImages(false);
       event.target.value = '';
     }
   };
 
-  const createPaddedImages = async () => {
+  const createPaddedImages = async (mode: ImageBatchMode = 'all', id?: string) => {
     const canvas = canvasRef.current;
-    if (!canvas || imageItems.length === 0 || isBusy) return;
-
+    if (!canvas || imageItems.length === 0 || busyRef.current || isBusy) return;
+    const targets = selectImageBatchItems(imageItems, fileStates, mode, id);
+    if (!targets.length) return;
     const signal = beginTask();
     if (!signal) return;
+    busyRef.current = true;
     setIsProcessing(true);
+    if (mode === 'all') clearResults();
     setCancellationMessage('');
     setProgressIndex(0);
-    setResults([]);
-    clearUrls(resultUrlsRef.current);
+    setProcessingTotal(targets.length);
     setErrorMessage('');
-
-    const nextResults: ImageResult[] = [];
+    setFileStates((previous) => ({ ...(mode === 'all' ? {} : previous), ...Object.fromEntries(targets.map((item) => [item.id, {status: 'waiting' as const}])) }));
+    const targetIds = new Set(targets.map((item) => item.id));
+    let succeededCount = 0;
 
     try {
-      const context = canvas.getContext('2d');
-      if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
-
-      for (let index = 0; index < imageItems.length; index += 1) {
-        throwIfAborted(signal);
-        const item = imageItems[index];
-        const layout = getImagePaddingLayout(item.width, item.height, alignment);
-        setProgressIndex(index + 1);
-        setProgressMessage(`${item.file.name} 처리 중...`);
-
-        const isGif = item.file.type === 'image/gif';
-        let blob: Blob;
-
-        if (isGif) {
-          const paddingColor = background === 'white' ? 'white' : '0x00000000';
-          [blob] = await processGifFilters(
-            item.file,
-            [`pad=${layout.width}:${layout.outputHeight}:${layout.x}:${layout.y}:color=${paddingColor}`],
-            setProgressMessage,
-            signal,
-          );
-        } else {
-          const image = await loadImage(item.src);
-          throwIfAborted(signal);
-          canvas.width = layout.width;
-          canvas.height = layout.outputHeight;
-          context.clearRect(0, 0, canvas.width, canvas.height);
-
-          if (background === 'white') {
-            context.fillStyle = '#ffffff';
-            context.fillRect(0, 0, canvas.width, canvas.height);
+      await runImageBatch({
+        items: targets,
+        signal,
+        onStart: (item, index) => {
+          setProgressIndex(index + 1);
+          setProgressMessage(`${item.file.name} 처리 중...`);
+          setFileStates((previous) => ({...previous, [item.id]: {status: 'processing'}}));
+        },
+        convert: async (item) => {
+          const layout = getImagePaddingLayout(item.width, item.height, alignment);
+          const isGif = item.file.type === 'image/gif';
+          let blob: Blob;
+          if (isGif) {
+            const paddingColor = background === 'white' ? 'white' : '0x00000000';
+            [blob] = await processGifFilters(item.file, [`pad=${layout.width}:${layout.outputHeight}:${layout.x}:${layout.y}:color=${paddingColor}`], setProgressMessage, signal);
+          } else {
+            const context = canvas.getContext('2d');
+            if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
+            const image = await loadImage(item.src);
+            throwIfAborted(signal);
+            canvas.width = layout.width;
+            canvas.height = layout.outputHeight;
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            if (background === 'white') {
+              context.fillStyle = '#ffffff';
+              context.fillRect(0, 0, canvas.width, canvas.height);
+            }
+            context.drawImage(image, layout.x, layout.y, layout.width, layout.height);
+            blob = await canvasToBlob(canvas);
           }
-
-          context.drawImage(image, layout.x, layout.y, layout.width, layout.height);
-          blob = await canvasToBlob(canvas);
-        }
-
-        throwIfAborted(signal);
-        const url = URL.createObjectURL(blob);
-        resultUrlsRef.current.add(url);
-
-        const result: ImageResult = {
-          id: item.id,
-          fileName: item.file.name,
-          outputName: getOutputFileName(item.file.name, isGif),
-          url,
-          size: blob.size,
-          width: item.width,
-          height: item.outputHeight,
-        };
-        nextResults.push(result);
-        setResults([...nextResults]);
-        onSuccess(blob.size);
-      }
-
+          return {blob, layout, isGif};
+        },
+        onOutcome: (item, outcome) => {
+          if (outcome.status !== 'succeeded') {
+            setFileStates((previous) => ({...previous, [item.id]: outcome}));
+            return;
+          }
+          const {blob, layout, isGif} = outcome.result;
+          let url: string;
+          try { url = URL.createObjectURL(blob); }
+          catch (error) {
+            setFileStates((previous) => ({...previous, [item.id]: {status: 'failed', message: error instanceof Error ? error.message : '결과 파일을 만들지 못했습니다.'}}));
+            return;
+          }
+          resultUrlsRef.current.add(url);
+          const result: ImageResult = {id: item.id, fileName: item.file.name, outputName: getOutputFileName(item.file.name, isGif), url, size: blob.size, width: layout.width, height: layout.outputHeight};
+          setResults((previous) => [...previous, result].sort((a, b) => imageItems.findIndex((entry) => entry.id === a.id) - imageItems.findIndex((entry) => entry.id === b.id)));
+          setFileStates((previous) => ({...previous, [item.id]: {status: 'succeeded'}}));
+          succeededCount++;
+          onSuccess(blob.size);
+        },
+      });
       throwIfAborted(signal);
-      confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
+      if (succeededCount > 0) confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
     } catch (error) {
       if (signal.aborted || isAbortError(error)) {
-        setCancellationMessage('작업을 취소했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+        setCancellationMessage('작업을 취소했습니다. 완료 결과는 유지되며 남은 파일을 이어서 처리할 수 있습니다.');
       } else {
         console.error(error);
         setErrorMessage('이미지 변환 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
       }
+      setFileStates((previous) => Object.fromEntries(Object.entries(previous).map(([id, state]) => [id, targetIds.has(id) && (state.status === 'waiting' || state.status === 'processing') ? {status: 'cancelled' as const} : state])));
     } finally {
+      busyRef.current = false;
       setIsProcessing(false);
       setProgressMessage('');
       finishTask();
@@ -436,21 +445,22 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                 <div className="w-full py-4 bg-[#121318] border border-white/10 rounded-xl flex flex-col items-center justify-center space-y-2 text-purple-400 font-medium">
                   <div className="flex items-center space-x-3">
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>Creating {progressIndex}/{imageItems.length}...</span>
+                    <span>Creating {progressIndex}/{processingTotal}...</span>
                   </div>
                   <span className="text-xs text-gray-400 text-center">{progressMessage || '브라우저에서 순차 처리 중'}</span>
                   <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />
                 </div>
               ) : (
                 <button
-                  onClick={createPaddedImages}
+                  onClick={() => void createPaddedImages('all')}
                   disabled={isBusy || imageItems.length === 0}
                   className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition duration-300 flex items-center justify-center space-x-2"
                 >
                   <Sparkles className="w-5 h-5 animate-pulse" />
-                  <span>Make {imageItems.length} Image{imageItems.length > 1 ? 's' : ''}</span>
+                  <span>{Object.keys(fileStates).length ? '전체 다시 처리' : `${imageItems.length}개 이미지 만들기`}</span>
                 </button>
               )}
+              <ImageBatchStatus items={imageItems.map((item) => ({id: item.id, name: item.file.name}))} states={fileStates} disabled={isBusy} onRetry={(id) => void createPaddedImages('failed', id)} onRetryFailed={() => void createPaddedImages('failed')} onResume={() => void createPaddedImages('remaining')} />
               {cancellationMessage && <p role="status" className="text-xs text-gray-400">{cancellationMessage}</p>}
             </div>
 
@@ -461,7 +471,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                     <AlertCircle className="w-4 h-4" />
                     <span>{results.length}/{imageItems.length} Images Ready!</span>
                   </span>
-                  {results.length > 1 && results.length === imageItems.length && (
+                  {results.length > 1 && (
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"

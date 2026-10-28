@@ -21,6 +21,8 @@ import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
 import { useMediaReceiver } from '@/hooks/useMediaTransfer';
 import { ResultActions } from './ResultActions';
+import { collectImageBatchParts, runImageBatch, selectImageBatchItems, type ImageBatchFileState, type ImageBatchMode } from '@/lib/imageBatch';
+import { ImageBatchStatus } from './ImageBatchStatus';
 
 interface ImageSplitterProps {
   onSuccess: (size: number) => void;
@@ -37,6 +39,7 @@ interface SourceImage {
 
 interface SplitResult {
   id: string;
+  sourceId: string;
   sourceName: string;
   fileName: string;
   url: string;
@@ -94,6 +97,8 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   const [columns, setColumns] = useState(1);
   const [rows, setRows] = useState(1);
   const [results, setResults] = useState<SplitResult[]>([]);
+  const [fileStates, setFileStates] = useState<Record<string, ImageBatchFileState>>({});
+  const [processingTotalParts, setProcessingTotalParts] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -128,6 +133,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   const clearResults = () => {
     clearUrls(resultUrlsRef.current);
     setResults([]);
+    setFileStates({});
     setCompletedParts(0);
     setProgressMessage('');
     setCancellationMessage('');
@@ -223,119 +229,106 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
 
   const updateDivisions = (axis: 'columns' | 'rows', value: number) => {
     if (busyRef.current || isBusy) return;
-    clearResults();
     setErrorMessage('');
     if (axis === 'columns') setColumns(clampDivision(value));
     else setRows(clampDivision(value));
   };
 
-  const splitImages = async () => {
+  const splitImages = async (mode: ImageBatchMode = 'all', id?: string) => {
     const canvas = canvasRef.current;
     if (!canvas || images.length === 0 || busyRef.current || isBusy) return;
-
     if (columns === 1 && rows === 1) {
       setErrorMessage('가로 또는 세로 분할 값을 2 이상으로 입력해 주세요.');
       return;
     }
-
-    if (images.some((image) => columns > image.width || rows > image.height)) {
-      setErrorMessage('분할 개수는 이미지의 가로·세로 픽셀 수보다 클 수 없습니다.');
-      return;
-    }
-
+    const targets = selectImageBatchItems(images, fileStates, mode, id);
+    if (!targets.length) return;
     const signal = beginTask();
     if (!signal) return;
     busyRef.current = true;
     setIsProcessing(true);
-    clearResults();
+    if (mode === 'all') clearResults();
+    setCompletedParts(0);
+    setProcessingTotalParts(targets.length * columns * rows);
+    setCancellationMessage('');
     setErrorMessage('');
-    const nextResults: SplitResult[] = [];
-    const context = canvas.getContext('2d');
-
-    const addResult = (source: SourceImage, slice: ImageSlice, blob: Blob, outputType: string) => {
-      throwIfAborted(signal);
-      const url = URL.createObjectURL(blob);
-      resultUrlsRef.current.add(url);
-      const result: SplitResult = {
-        id: `${source.id}-${slice.row}-${slice.column}`,
-        sourceName: source.file.name,
-        fileName: getPartFileName(
-          source.file.name,
-          slice.row,
-          slice.column,
-          rows,
-          columns,
-          outputType,
-        ),
-        url,
-        size: blob.size,
-        width: slice.width,
-        height: slice.height,
-        column: slice.column,
-        row: slice.row,
-      };
-
-      nextResults.push(result);
-      setResults([...nextResults]);
-      setCompletedParts(nextResults.length);
-      onSuccess(blob.size);
-    };
+    setFileStates((previous) => ({...(mode === 'all' ? {} : previous), ...Object.fromEntries(targets.map((source) => [source.id, {status: 'waiting' as const}]))}));
+    const targetIds = new Set(targets.map((source) => source.id));
+    let processedParts = 0;
+    let succeededCount = 0;
 
     try {
-      if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
-
-      for (const source of images) {
-        throwIfAborted(signal);
-        const slices = getImageSlices(source.width, source.height, columns, rows);
-        const outputType = SUPPORTED_TYPES.has(source.file.type) ? source.file.type : 'image/png';
-
-        if (source.file.type === 'image/gif') {
-          const blobs = await processGifFilters(
-            source.file,
-            slices.map((slice) => `crop=${slice.width}:${slice.height}:${slice.x}:${slice.y}`),
-            setProgressMessage,
-            signal,
-          );
-
+      await runImageBatch({
+        items: targets,
+        signal,
+        onStart: (source) => {
+          setProgressMessage(`${source.file.name} 처리 중...`);
+          setFileStates((previous) => ({...previous, [source.id]: {status: 'processing'}}));
+        },
+        convert: async (source) => {
+          if (columns > source.width || rows > source.height) throw new Error('분할 개수는 이미지의 가로·세로 픽셀 수보다 클 수 없습니다.');
+          const slices = getImageSlices(source.width, source.height, columns, rows);
+          const outputType = SUPPORTED_TYPES.has(source.file.type) ? source.file.type : 'image/png';
+          const parts: {slice: ImageSlice; blob: Blob; outputType: string}[] = [];
+          if (source.file.type === 'image/gif') {
+            const blobs = await processGifFilters(source.file, slices.map((slice) => `crop=${slice.width}:${slice.height}:${slice.x}:${slice.y}`), setProgressMessage, signal);
+            throwIfAborted(signal);
+            if (blobs.length !== slices.length) throw new Error('일부 GIF 조각을 만들지 못했습니다. 다시 시도해 주세요.');
+            for (const [index, blob] of blobs.entries()) parts.push({slice: slices[index], blob, outputType});
+            processedParts += parts.length;
+            setCompletedParts(processedParts);
+            return parts;
+          }
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
+          const image = await loadImage(source.url);
           throwIfAborted(signal);
-          blobs.forEach((blob, index) => addResult(source, slices[index], blob, outputType));
-          continue;
-        }
-
-        const image = await loadImage(source.url);
-        throwIfAborted(signal);
-
-        for (const slice of slices) {
-          throwIfAborted(signal);
-          setProgressMessage(`${source.file.name} 조각 ${nextResults.length + 1}/${totalParts} 처리 중...`);
-          canvas.width = slice.width;
-          canvas.height = slice.height;
-          context.clearRect(0, 0, slice.width, slice.height);
-          context.drawImage(
-            image,
-            slice.x,
-            slice.y,
-            slice.width,
-            slice.height,
-            0,
-            0,
-            slice.width,
-            slice.height,
-          );
-          const blob = await canvasToBlob(canvas, outputType);
-          addResult(source, slice, blob, outputType);
-        }
-      }
-
+          return collectImageBatchParts(slices, signal, async (slice, index) => {
+            setProgressMessage(`${source.file.name} 조각 ${index + 1}/${slices.length} 처리 중...`);
+            canvas.width = slice.width;
+            canvas.height = slice.height;
+            context.clearRect(0, 0, slice.width, slice.height);
+            context.drawImage(image, slice.x, slice.y, slice.width, slice.height, 0, 0, slice.width, slice.height);
+            const blob = await canvasToBlob(canvas, outputType);
+            throwIfAborted(signal);
+            setCompletedParts(++processedParts);
+            return {slice, blob, outputType};
+          });
+        },
+        onOutcome: (source, outcome) => {
+          if (outcome.status !== 'succeeded') {
+            setFileStates((previous) => ({...previous, [source.id]: outcome}));
+            return;
+          }
+          // Publish a source only when every part exists. Failed/cancelled sources leave no URLs or partial results.
+          const sourceResults: SplitResult[] = [];
+          try {
+            for (const {slice, blob, outputType} of outcome.result) {
+              const url = URL.createObjectURL(blob);
+              sourceResults.push({id: `${source.id}-${slice.row}-${slice.column}`, sourceId: source.id, sourceName: source.file.name, fileName: getPartFileName(source.file.name, slice.row, slice.column, rows, columns, outputType), url, size: blob.size, width: slice.width, height: slice.height, column: slice.column, row: slice.row});
+            }
+          } catch (error) {
+            sourceResults.forEach((result) => URL.revokeObjectURL(result.url));
+            setFileStates((previous) => ({...previous, [source.id]: {status: 'failed', message: error instanceof Error ? error.message : '결과 파일을 만들지 못했습니다.'}}));
+            return;
+          }
+          sourceResults.forEach((result) => resultUrlsRef.current.add(result.url));
+          setResults((previous) => [...previous, ...sourceResults].sort((a, b) => images.findIndex((entry) => entry.id === a.sourceId) - images.findIndex((entry) => entry.id === b.sourceId) || a.row - b.row || a.column - b.column));
+          setFileStates((previous) => ({...previous, [source.id]: {status: 'succeeded'}}));
+          succeededCount++;
+          sourceResults.forEach((result) => onSuccess(result.size));
+        },
+      });
       throwIfAborted(signal);
-      confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
+      if (succeededCount > 0) confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
     } catch (error) {
       if (signal.aborted || isAbortError(error)) {
-        setCancellationMessage('작업을 취소했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+        setCancellationMessage('작업을 취소했습니다. 완료된 파일의 결과는 유지되며 남은 파일을 이어서 처리할 수 있습니다.');
       } else {
         console.error(error);
         setErrorMessage('이미지를 자르는 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
       }
+      setFileStates((previous) => Object.fromEntries(Object.entries(previous).map(([id, state]) => [id, targetIds.has(id) && (state.status === 'waiting' || state.status === 'processing') ? {status: 'cancelled' as const} : state])));
     } finally {
       busyRef.current = false;
       setIsProcessing(false);
@@ -514,7 +507,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                 <div className="flex w-full flex-col items-center justify-center gap-2 rounded-xl border border-white/10 bg-[#121318] py-4 font-medium text-purple-400">
                   <div className="flex items-center gap-3">
                     <Loader2 className="h-5 w-5 animate-spin" />
-                    <span>{completedParts}/{totalParts} 자르는 중...</span>
+                    <span>{completedParts}/{processingTotalParts} 자르는 중...</span>
                   </div>
                   <span className="px-3 text-center text-xs text-gray-400">{progressMessage || '브라우저에서 순차 처리 중'}</span>
                   <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />
@@ -522,14 +515,15 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
               ) : (
                 <button
                   type="button"
-                  onClick={splitImages}
+                  onClick={() => void splitImages('all')}
                   disabled={isBusy}
                   className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 py-4 font-medium shadow-lg shadow-purple-500/10 transition duration-300 hover:from-purple-500 hover:to-indigo-500 hover:shadow-purple-500/25 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Sparkles className="h-5 w-5" />
-                  {totalParts}개 이미지 조각 만들기
+                  {Object.keys(fileStates).length ? '전체 다시 처리' : `${totalParts}개 이미지 조각 만들기`}
                 </button>
               )}
+              <ImageBatchStatus items={images.map((image) => ({id: image.id, name: image.file.name}))} states={fileStates} disabled={isBusy} onRetry={(id) => void splitImages('failed', id)} onRetryFailed={() => void splitImages('failed')} onResume={() => void splitImages('remaining')} />
               {cancellationMessage && <p role="status" className="text-xs text-gray-400">{cancellationMessage}</p>}
             </div>
 
@@ -538,7 +532,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <span className="flex items-center gap-1.5 text-sm font-semibold text-green-400">
                     <AlertCircle className="h-4 w-4" />
-                    {results.length}/{totalParts}개 완료
+                    {results.length}개 조각 완료
                   </span>
                   <div className="flex flex-wrap gap-2">
                     <button

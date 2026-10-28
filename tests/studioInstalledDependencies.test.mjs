@@ -10,6 +10,21 @@ import {createBrowserDependencyPolicy, createProjectBoundaryPlugin} from '../pac
 const installedBundlerRequire = createRequire(createRequire(import.meta.url).resolve('@remotion/bundler'));
 const webpackResolver = installedBundlerRequire('enhanced-resolve').create.sync;
 
+// Production installs this boundary before Webpack resolves package requests.
+// In particular, snapshots may live below a consumer's conflicting node_modules.
+const boundaryHooks = ({snapshot, policy}) => {
+  let beforeResolve;
+  let afterResolve;
+  const factory = {hooks: {
+    beforeResolve: {tap(name, callback) {beforeResolve = callback;}},
+    afterResolve: {tap(name, callback) {afterResolve = callback;}},
+  }};
+  createProjectBoundaryPlugin(snapshot, policy).apply({hooks: {normalModuleFactory: {
+    tap(name, callback) {callback(factory);},
+  }}});
+  return {beforeResolve, afterResolve};
+};
+
 const install = async (modules, name, manifest = {}) => {
   const root = path.join(modules, name);
   await mkdir(root, {recursive: true});
@@ -59,6 +74,7 @@ const fixture = async (t, nested) => {
 for (const nested of [false, true]) {
   test(`installed ${nested ? 'nested' : 'hoisted'} dependencies retain package-local versions and reject unrelated host paths`, async (t) => {
     const f = await fixture(t, nested);
+    const conflictingZod = nested ? await install(path.join(f.root, 'node_modules'), 'zod', {version: '2.0.0'}) : null;
     assert.deepEqual(f.policy.moduleDirectories, [f.modules]);
     for (const dependency of [f.react, f.zod3, f.zod4, f.styleLoader, f.cssLoader]) {
       assert.equal(f.policy.canImport(path.join(dependency, 'index.js')), true);
@@ -72,8 +88,27 @@ for (const nested of [false, true]) {
     assert.equal(localRequire.resolve('zod'), path.join(f.zod4, 'index.js'));
     assert.notEqual(localRequire.resolve('zod'), path.join(f.zod3, 'index.js'));
     const resolve = webpackResolver({modules: ['node_modules', ...f.policy.moduleDirectories]});
-    assert.equal(resolve(f.snapshot, 'zod'), path.join(f.zod3, 'index.js'));
-    assert.equal(resolve(f.remotionInternal, 'zod'), path.join(f.zod4, 'index.js'));
+    const {beforeResolve, afterResolve} = boundaryHooks(f);
+    const projectImport = {request: 'zod', context: f.snapshot};
+    beforeResolve(projectImport);
+    assert.equal(projectImport.context, f.policy.projectResolveDirectory);
+    const projectResource = resolve(projectImport.context, projectImport.request);
+    assert.equal(projectResource, path.join(f.zod3, 'index.js'));
+    assert.doesNotThrow(() => afterResolve({createData: {resource: projectResource}}));
+    const internalImport = {request: 'zod', context: f.remotionInternal};
+    beforeResolve(internalImport);
+    assert.equal(internalImport.context, f.remotionInternal);
+    const internalResource = resolve(internalImport.context, internalImport.request);
+    assert.equal(internalResource, path.join(f.zod4, 'index.js'));
+    assert.doesNotThrow(() => afterResolve({createData: {resource: internalResource}}));
+    const relativeImport = {request: './entry.js', context: f.snapshot};
+    beforeResolve(relativeImport);
+    assert.equal(relativeImport.context, f.snapshot);
+    if (conflictingZod) {
+      const hostResource = path.join(conflictingZod, 'index.js');
+      assert.equal(f.policy.canImport(hostResource), false);
+      assert.throws(() => afterResolve({createData: {resource: hostResource}}), /Imports must stay inside/);
+    }
   });
 }
 
@@ -83,13 +118,7 @@ test('mixed dependency layouts prefer companion-local versions ahead of consumer
   const conflictingZod = await install(hostModules, 'zod', {version: '2.0.0'});
   assert.deepEqual(f.policy.moduleDirectories, [f.modules, hostModules]);
   const resolve = webpackResolver({modules: ['node_modules', ...f.policy.moduleDirectories]});
-  let beforeResolve;
-  createProjectBoundaryPlugin(f.snapshot, f.policy).apply({hooks: {normalModuleFactory: {
-    tap(name, action) {action({hooks: {
-      beforeResolve: {tap(name, callback) {beforeResolve = callback;}},
-      afterResolve: {tap() {}},
-    }});},
-  }}});
+  const {beforeResolve} = boundaryHooks(f);
   const projectImport = {request: 'zod', context: f.snapshot};
   beforeResolve(projectImport);
   assert.equal(resolve(projectImport.context, projectImport.request), path.join(f.zod3, 'index.js'));
@@ -103,14 +132,7 @@ test('mixed dependency layouts prefer companion-local versions ahead of consumer
 
 test('the Webpack boundary accepts trusted CSS loaders and rejects project loaders, builtins and host imports', async (t) => {
   const f = await fixture(t, true);
-  let beforeResolve; let afterResolve;
-  const factory = {hooks: {
-    beforeResolve: {tap(name, action) {beforeResolve = action;}},
-    afterResolve: {tap(name, action) {afterResolve = action;}},
-  }};
-  createProjectBoundaryPlugin(f.snapshot, f.policy).apply({hooks: {normalModuleFactory: {
-    tap(name, action) {action(factory);},
-  }}});
+  const {beforeResolve, afterResolve} = boundaryHooks(f);
   const entry = path.join(f.snapshot, 'entry.js');
   for (const loader of f.policy.allowedLoaders) {
     assert.doesNotThrow(() => beforeResolve({request: `-!${loader}?trusted=true!${entry}`, context: f.snapshot}));

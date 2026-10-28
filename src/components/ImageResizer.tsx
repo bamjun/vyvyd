@@ -22,6 +22,9 @@ import { useMediaReceiver } from '@/hooks/useMediaTransfer';
 import { ResultActions } from './ResultActions';
 import { TargetSizeControl } from './TargetSizeControl';
 import { optimizeToTargetSize, parseTargetSize, type TargetEncodingSettings } from '@/lib/targetSize';
+import { runImageBatch, selectImageBatchItems, type ImageBatchFileState, type ImageBatchMode } from '@/lib/imageBatch';
+import { ImageBatchStatus } from './ImageBatchStatus';
+import { SettingsPresets } from './SettingsPresets';
 
 interface ImageResizerProps {
   onSuccess: (size: number) => void;
@@ -129,6 +132,8 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const [isLoadingImages, setIsLoadingImages] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressIndex, setProgressIndex] = useState(0);
+  const [progressTotal, setProgressTotal] = useState(0);
+  const [fileStates, setFileStates] = useState<Record<string, ImageBatchFileState>>({});
   const [progressMessage, setProgressMessage] = useState('');
   const [results, setResults] = useState<ResizeResult[]>([]);
   const [errorMessage, setErrorMessage] = useState('');
@@ -160,6 +165,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const clearResults = () => {
     clearUrls(resultUrlsRef.current);
     setResults([]);
+    setFileStates({});
     setProgressIndex(0);
     setProgressMessage('');
     setCancellationMessage('');
@@ -255,16 +261,17 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
   const updateSetting = (callback: () => void) => {
     if (busyRef.current || isBusy) return;
-    clearResults();
     setErrorMessage('');
     callback();
   };
 
-  const createResizedImages = async () => {
+  const createResizedImages = async (mode: ImageBatchMode = 'all', id?: string) => {
     const canvas = canvasRef.current;
     if (!canvas || imageItems.length === 0 || busyRef.current || isBusy) return;
+    const targets = selectImageBatchItems(imageItems, fileStates, mode, id);
+    if (!targets.length) return;
 
-    if (resizeMode === 'bounds' && (maxWidth < 1 || maxHeight < 1)) {
+    if (resizeMode === 'bounds' && (!Number.isFinite(maxWidth) || !Number.isFinite(maxHeight) || maxWidth < 1 || maxHeight < 1)) {
       setErrorMessage('최대 가로와 세로는 1px 이상이어야 합니다.');
       return;
     }
@@ -279,119 +286,149 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
     if (!signal) return;
     busyRef.current = true;
     setIsProcessing(true);
-    clearResults();
+    if (mode === 'all') clearResults();
+    setProgressIndex(0);
+    setProgressTotal(targets.length);
     setErrorMessage('');
-
-    const nextResults: ResizeResult[] = [];
+    setCancellationMessage('');
+    setFileStates((previous) => ({
+      ...(mode === 'all' ? {} : previous),
+      ...Object.fromEntries(targets.map((item) => [item.id, { status: 'waiting' as const }])),
+    }));
+    let succeeded = 0;
+    let failed = 0;
 
     try {
-      const context = canvas.getContext('2d');
-      if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
+      await runImageBatch({
+        items: targets,
+        signal,
+        onStart: (item, index) => {
+          setProgressIndex(index + 1);
+          setProgressMessage(`${item.file.name} 처리 중...`);
+          setFileStates((previous) => ({ ...previous, [item.id]: { status: 'processing' } }));
+        },
+        convert: async (item) => {
+          const target = getTargetDimensions(item, resizeMode, percentage, maxWidth, maxHeight);
+          const outputType = getOutputType(outputFormat, item.file.type);
+          const preserveAnimatedGif = item.file.type === 'image/gif' && outputFormat === 'original';
 
-      for (let index = 0; index < imageItems.length; index += 1) {
-        throwIfAborted(signal);
-        const item = imageItems[index];
-        const target = getTargetDimensions(item, resizeMode, percentage, maxWidth, maxHeight);
-        const outputType = getOutputType(outputFormat, item.file.type);
-        const preserveAnimatedGif = item.file.type === 'image/gif' && outputFormat === 'original';
-
-        setProgressIndex(index + 1);
-        setProgressMessage(`${item.file.name} 처리 중...`);
-
-        const image = preserveAnimatedGif ? null : await loadImage(item.src);
-        throwIfAborted(signal);
-        const encode = async (settings: TargetEncodingSettings, attempt: number): Promise<Blob> => {
+          const image = preserveAnimatedGif ? null : await loadImage(item.src);
           throwIfAborted(signal);
-          const attemptLabel = targetSizeEnabled ? `${item.file.name} · 자동 최적화 ${attempt}회차` : `${item.file.name} 처리 중...`;
-          setProgressMessage(attemptLabel);
+          const encode = async (settings: TargetEncodingSettings, attempt: number): Promise<Blob> => {
+            throwIfAborted(signal);
+            const attemptLabel = targetSizeEnabled ? `${item.file.name} · 자동 최적화 ${attempt}회차` : `${item.file.name} 처리 중...`;
+            setProgressMessage(attemptLabel);
 
-          if (preserveAnimatedGif) {
-            const [gifBlob] = await processGifFilters(
-              item.file,
-              [`scale=${settings.width}:${settings.height}:flags=lanczos`],
-              (message) => setProgressMessage(`${attemptLabel} · ${message}`),
-              signal,
-              settings.colors === undefined ? undefined : { colors: settings.colors },
-            );
-            return gifBlob;
-          }
+            if (preserveAnimatedGif) {
+              const [gifBlob] = await processGifFilters(
+                item.file,
+                [`scale=${settings.width}:${settings.height}:flags=lanczos`],
+                (message) => setProgressMessage(`${attemptLabel} · ${message}`),
+                signal,
+                settings.colors === undefined ? undefined : { colors: settings.colors },
+              );
+              return gifBlob;
+            }
 
-          if (!image) throw new Error('이미지를 읽을 수 없습니다.');
-          canvas.width = settings.width;
-          canvas.height = settings.height;
-          context.clearRect(0, 0, settings.width, settings.height);
-          context.imageSmoothingEnabled = true;
-          context.imageSmoothingQuality = 'high';
+            if (!image) throw new Error('이미지를 읽을 수 없습니다.');
+            const context = canvas.getContext('2d');
+            if (!context) throw new Error('Canvas를 사용할 수 없습니다.');
+            canvas.width = settings.width;
+            canvas.height = settings.height;
+            context.clearRect(0, 0, settings.width, settings.height);
+            context.imageSmoothingEnabled = true;
+            context.imageSmoothingQuality = 'high';
 
-          if (outputType === 'image/jpeg') {
-            context.fillStyle = '#ffffff';
-            context.fillRect(0, 0, settings.width, settings.height);
-          }
+            if (outputType === 'image/jpeg') {
+              context.fillStyle = '#ffffff';
+              context.fillRect(0, 0, settings.width, settings.height);
+            }
 
-          context.drawImage(image, 0, 0, settings.width, settings.height);
-          const encoded = await canvasToBlob(canvas, outputType, settings.quality);
-          if (targetSizeEnabled && encoded.type !== outputType) {
-            throw new Error('선택한 이미지 저장 형식을 이 브라우저에서 지원하지 않습니다.');
-          }
-          return encoded;
-        };
-
-        let blob: Blob;
-        let resultSettings: TargetEncodingSettings = {
-          ...target,
-          quality: outputType === 'image/jpeg' || outputType === 'image/webp' ? quality / 100 : undefined,
-        };
-        let optimization: ResizeResult['optimization'];
-        if (targetBytes !== null) {
-          const optimized = await optimizeToTargetSize({
-            targetBytes,
-            initial: { ...resultSettings, colors: preserveAnimatedGif ? 256 : undefined },
-            signal,
-            onProgress: (message) => setProgressMessage(`${item.file.name} · ${message}`),
-            encode,
-          });
-          blob = optimized.blob;
-          resultSettings = optimized.settings;
-          optimization = {
-            targetBytes: optimized.targetBytes,
-            metTarget: optimized.metTarget,
-            attempts: optimized.attempts,
-            quality: optimized.settings.quality,
-            colors: optimized.settings.colors,
+            context.drawImage(image, 0, 0, settings.width, settings.height);
+            const encoded = await canvasToBlob(canvas, outputType, settings.quality);
+            if (targetSizeEnabled && encoded.type !== outputType) {
+              throw new Error('선택한 이미지 저장 형식을 이 브라우저에서 지원하지 않습니다.');
+            }
+            return encoded;
           };
-        } else {
-          blob = await encode(resultSettings, 1);
-        }
-        throwIfAborted(signal);
-        const url = URL.createObjectURL(blob);
-        resultUrlsRef.current.add(url);
 
-        const result: ResizeResult = {
-          id: item.id,
-          originalName: item.file.name,
-          downloadName: getDownloadName(item.file.name, resultSettings.width, resultSettings.height, outputType),
-          url,
-          size: blob.size,
-          originalSize: item.file.size,
-          width: resultSettings.width,
-          height: resultSettings.height,
-          optimization,
-        };
+          let blob: Blob;
+          let resultSettings: TargetEncodingSettings = {
+            ...target,
+            quality: outputType === 'image/jpeg' || outputType === 'image/webp' ? quality / 100 : undefined,
+          };
+          let optimization: ResizeResult['optimization'];
+          if (targetBytes !== null) {
+            const optimized = await optimizeToTargetSize({
+              targetBytes,
+              initial: { ...resultSettings, colors: preserveAnimatedGif ? 256 : undefined },
+              signal,
+              onProgress: (message) => setProgressMessage(`${item.file.name} · ${message}`),
+              encode,
+            });
+            blob = optimized.blob;
+            resultSettings = optimized.settings;
+            optimization = {
+              targetBytes: optimized.targetBytes,
+              metTarget: optimized.metTarget,
+              attempts: optimized.attempts,
+              quality: optimized.settings.quality,
+              colors: optimized.settings.colors,
+            };
+          } else {
+            blob = await encode(resultSettings, 1);
+          }
+          throwIfAborted(signal);
+          return { blob, resultSettings, optimization, outputType };
+        },
+        onOutcome: (item, outcome) => {
+          if (outcome.status === 'succeeded') {
+            const { blob, resultSettings, optimization, outputType } = outcome.result;
+            let url: string;
+            try { url = URL.createObjectURL(blob); }
+            catch (error) {
+              failed += 1;
+              setFileStates((previous) => ({ ...previous, [item.id]: { status: 'failed', message: error instanceof Error ? error.message : '결과 파일을 만들지 못했습니다.' } }));
+              return;
+            }
+            resultUrlsRef.current.add(url);
 
-        nextResults.push(result);
-        setResults([...nextResults]);
-        onSuccess(Math.max(0, item.file.size - blob.size));
-      }
+            const result: ResizeResult = {
+              id: item.id,
+              originalName: item.file.name,
+              downloadName: getDownloadName(item.file.name, resultSettings.width, resultSettings.height, outputType),
+              url,
+              size: blob.size,
+              originalSize: item.file.size,
+              width: resultSettings.width,
+              height: resultSettings.height,
+              optimization,
+            };
+
+            setResults((previous) => [...previous.filter((entry) => entry.id !== item.id), result]
+              .sort((left, right) => imageItems.findIndex((entry) => entry.id === left.id) - imageItems.findIndex((entry) => entry.id === right.id)));
+            succeeded += 1;
+            onSuccess(Math.max(0, item.file.size - blob.size));
+          } else if (outcome.status === 'failed') failed += 1;
+          setFileStates((previous) => ({ ...previous, [item.id]: outcome.status === 'failed'
+            ? { status: 'failed', message: outcome.message } : { status: outcome.status } }));
+        },
+      });
 
       throwIfAborted(signal);
-      confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
+      if (succeeded > 0 && failed === 0) confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
+      setCancellationMessage(`이번 작업: 완료 ${succeeded}개 · 실패 ${failed}개.${failed ? ' 실패한 파일만 다시 시도할 수 있습니다.' : ''}`);
     } catch (error) {
       if (signal.aborted || isAbortError(error)) {
-        setCancellationMessage('작업을 취소했습니다. 완료된 결과는 다운로드할 수 있습니다.');
+        setCancellationMessage('작업을 취소했습니다. 완료된 결과는 유지되며, 남은 파일을 이어서 처리할 수 있습니다.');
       } else {
         console.error(error);
         setErrorMessage('이미지 축소 중 오류가 발생했습니다. 완료된 결과는 다운로드할 수 있습니다.');
       }
+      const targetIds = new Set(targets.map((item) => item.id));
+      setFileStates((previous) => Object.fromEntries(Object.entries(previous).map(([itemId, state]) => [itemId,
+        targetIds.has(itemId) && (state.status === 'waiting' || state.status === 'processing') ? { status: 'cancelled' as const } : state,
+      ])));
     } finally {
       busyRef.current = false;
       setIsProcessing(false);
@@ -437,6 +474,22 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
   return (
     <div className="space-y-8">
+      <SettingsPresets
+        tool="image-resize"
+        settings={{ resizeMode, percentage, maxWidth, maxHeight, outputFormat, quality, targetSizeEnabled, targetSizeValue, targetSizeUnit }}
+        disabled={isBusy}
+        onApply={(next) => updateSetting(() => {
+          setResizeMode(next.resizeMode);
+          setPercentage(next.percentage);
+          setMaxWidth(next.maxWidth);
+          setMaxHeight(next.maxHeight);
+          setOutputFormat(next.outputFormat);
+          setQuality(next.quality);
+          setTargetSizeEnabled(next.targetSizeEnabled);
+          setTargetSizeValue(next.targetSizeValue);
+          setTargetSizeUnit(next.targetSizeUnit);
+        })}
+      />
       {isLoadingImages && imageItems.length > 0 && <p role="status" className="text-xs text-purple-300">이미지 불러오는 중...</p>}
       {imageItems.length === 0 ? (
         <div
@@ -684,23 +737,33 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                 <div className="w-full py-4 bg-[#121318] border border-white/10 rounded-xl flex flex-col items-center justify-center space-y-2 text-purple-400 font-medium">
                   <div className="flex items-center space-x-3">
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>{progressIndex}/{imageItems.length} 처리 중...</span>
+                    <span>{progressIndex}/{progressTotal} 처리 중...</span>
                   </div>
                   <span className="text-xs text-gray-400 text-center">{progressMessage || '브라우저에서 안전하게 일괄 축소 중'}</span>
                   <CancelProcessingButton onClick={cancelTask} disabled={isCancelling} />
                 </div>
               ) : (
                 <button
-                  onClick={createResizedImages}
+                  onClick={() => void createResizedImages()}
                   disabled={isBusy || (targetSizeEnabled && parseTargetSize(targetSizeValue, targetSizeUnit) === null)}
                   className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 transition duration-300 flex items-center justify-center space-x-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Sparkles className="w-5 h-5 animate-pulse" />
-                  <span>{imageItems.length}개 이미지 {targetSizeEnabled ? '목표 용량 맞추기' : '크기 줄이기'}</span>
+                  <span>{Object.keys(fileStates).length > 0 ? `전체 ${imageItems.length}개 다시 처리` : `${imageItems.length}개 이미지 ${targetSizeEnabled ? '목표 용량 맞추기' : '크기 줄이기'}`}</span>
                 </button>
               )}
               {cancellationMessage && <p role="status" className="text-xs text-gray-400">{cancellationMessage}</p>}
+              {errorMessage && <p role="alert" className="text-xs text-red-300">{errorMessage}</p>}
             </div>
+
+            <ImageBatchStatus
+              items={imageItems.map((item) => ({ id: item.id, name: item.file.name }))}
+              states={fileStates}
+              disabled={isBusy || (targetSizeEnabled && parseTargetSize(targetSizeValue, targetSizeUnit) === null)}
+              onRetry={(itemId) => void createResizedImages('failed', itemId)}
+              onRetryFailed={() => void createResizedImages('failed')}
+              onResume={() => void createResizedImages('remaining')}
+            />
 
             {results.length > 0 && (
               <div className="glass-panel rounded-2xl p-6 space-y-4 border border-green-500/20">

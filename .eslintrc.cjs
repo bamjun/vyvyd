@@ -18,5 +18,6 @@ module.exports = {
   rules: {
     '@typescript-eslint/no-explicit-any': 'off',
   },
-  ignorePatterns: ['dist', 'node_modules'],
+  // Preview snapshots, packaged smoke checks and compiler copies are generated.
+  ignorePatterns: ['dist', 'dist-ssr', 'node_modules', '/artifacts/', '/.cache/', '/.local/studio/', '/public/studio-compiler/'],
 };
