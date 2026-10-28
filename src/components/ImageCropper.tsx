@@ -23,6 +23,8 @@ import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
 import { CropPresetControls } from './CropPresetControls';
 import { centerCrop, constrainCrop, CropPreset, CropRect, getPresetAspectRatio, getPresetCrop } from '@/lib/cropPresets';
+import { useMediaWorkspace } from '@/hooks/useMediaWorkspace';
+import { MediaWorkspaceNotice } from './MediaWorkspaceNotice';
 
 interface ImageCropperProps {
   onSuccess: (size: number) => void;
@@ -132,6 +134,24 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   const sourceUrlRef = useRef('');
   const resultUrlRef = useRef('');
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
+  const workspace = useMediaWorkspace({
+    tool: 'crop',
+    snapshot: { sourceFile, sourceUrl, sourceWidth, sourceHeight, crop, cropPreset, scale, result },
+    busy: isProcessing,
+    restore: (saved) => {
+      sourceUrlRef.current = saved.sourceUrl;
+      resultUrlRef.current = saved.result?.url ?? '';
+      setSourceFile(saved.sourceFile);
+      setSourceUrl(saved.sourceUrl);
+      setSourceWidth(saved.sourceWidth);
+      setSourceHeight(saved.sourceHeight);
+      setCrop(saved.crop);
+      setCropPreset(saved.cropPreset);
+      setScale(saved.scale);
+      setResult(saved.result);
+    },
+  });
+  const isBusy = !workspace.ready || isProcessing || activeRequestId !== null;
 
   const clearResult = () => {
     if (resultUrlRef.current) {
@@ -147,7 +167,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   }, []);
 
   const selectFile = async (file: File) => {
-    if (isProcessing) return;
+    if (isBusy) return;
     const format = getImageFormat(file);
     if (!format) {
       setErrorMessage('JPG, PNG, WebP 또는 GIF 파일을 선택해 주세요.');
@@ -183,7 +203,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   };
 
   const resetCrop = () => {
-    if (isProcessing) return;
+    if (isBusy) return;
     clearResult();
     setCancellationMessage('');
     setCropPreset('free');
@@ -191,14 +211,14 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   };
 
   const updateCrop = (nextCrop: CropRect) => {
-    if (isProcessing) return;
+    if (isBusy) return;
     clearResult();
     setCancellationMessage('');
     setCrop(constrainCrop(nextCrop, { width: sourceWidth, height: sourceHeight }, getPresetAspectRatio(cropPreset)));
   };
 
   const selectPreset = (preset: CropPreset) => {
-    if (isProcessing) return;
+    if (isBusy) return;
     clearResult();
     setCancellationMessage('');
     setCropPreset(preset);
@@ -208,7 +228,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   const moveCropToCenter = () => updateCrop(centerCrop(crop, { width: sourceWidth, height: sourceHeight }));
 
   const clearSource = () => {
-    if (isProcessing) return;
+    if (isBusy) return;
     if (sourceUrlRef.current) {
       URL.revokeObjectURL(sourceUrlRef.current);
       sourceUrlRef.current = '';
@@ -226,7 +246,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
 
   const cropImage = async () => {
     const image = imageRef.current;
-    if (!sourceFile || !image || isProcessing) return;
+    if (!sourceFile || !image || isBusy) return;
 
     const format = getImageFormat(sourceFile);
     if (!format) return;
@@ -286,7 +306,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   };
 
   const sendResultToDiscord = () => {
-    if (!result) return;
+    if (!result || isBusy) return;
     void sendToDiscord('cropped-image', [{ url: result.url, name: result.fileName }]);
   };
 
@@ -297,6 +317,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
   if (!sourceFile || !sourceUrl) {
     return (
       <div className="space-y-4">
+        <MediaWorkspaceNotice state={workspace} />
         <label
           className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-purple-500/20 bg-white/5 p-12 transition duration-300 hover:border-purple-500/50"
           onDragOver={(event) => event.preventDefault()}
@@ -320,6 +341,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
             type="file"
             accept="image/jpeg,image/png,image/webp,image/gif"
             onChange={handleFileChange}
+            disabled={isBusy}
             className="hidden"
           />
         </label>
@@ -335,6 +357,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
 
   return (
     <div className="grid grid-cols-1 gap-8 lg:grid-cols-12">
+      <div className="lg:col-span-12"><MediaWorkspaceNotice state={workspace} /></div>
       <div className="space-y-4 lg:col-span-7">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
@@ -347,7 +370,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
             <button
               type="button"
               onClick={resetCrop}
-              disabled={isProcessing}
+              disabled={isBusy}
               className="flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50"
             >
               <RefreshCw className="h-3 w-3" />
@@ -356,7 +379,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
             <button
               type="button"
               onClick={clearSource}
-              disabled={isProcessing}
+              disabled={isBusy}
               className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 disabled:opacity-50"
             >
               <X className="h-3 w-3" />
@@ -365,7 +388,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
           </div>
         </div>
 
-        <div className={`glass-panel relative flex min-h-[300px] select-none items-center justify-center overflow-hidden rounded-2xl bg-black ${isProcessing ? 'pointer-events-none' : ''}`}>
+        <div className={`glass-panel relative flex min-h-[300px] select-none items-center justify-center overflow-hidden rounded-2xl bg-black ${isBusy ? 'pointer-events-none' : ''}`}>
           <img
             ref={imageRef}
             src={sourceUrl}
@@ -400,7 +423,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
             preset={cropPreset}
             onPresetChange={selectPreset}
             onCenter={moveCropToCenter}
-            disabled={isProcessing}
+            disabled={isBusy}
           />
 
           <div>
@@ -414,8 +437,9 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
               max={1.5}
               step={0.05}
               value={scale}
-              disabled={isProcessing}
+              disabled={isBusy}
               onChange={(event) => {
+                if (isBusy) return;
                 clearResult();
                 setCancellationMessage('');
                 setScale(Number(event.target.value));
@@ -430,7 +454,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
           <button
             type="button"
             onClick={cropImage}
-            disabled={isProcessing || crop.width < 1 || crop.height < 1}
+            disabled={isBusy || crop.width < 1 || crop.height < 1}
             className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 py-4 font-medium shadow-lg shadow-purple-500/10 transition duration-300 hover:from-purple-500 hover:to-indigo-500 hover:shadow-purple-500/25 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isProcessing ? <Loader2 className="h-5 w-5 animate-spin" /> : <Sparkles className="h-5 w-5" />}
@@ -474,7 +498,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
               <button
                 type="button"
                 onClick={sendResultToDiscord}
-                disabled={activeRequestId !== null}
+                disabled={isBusy}
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-center font-medium shadow-lg shadow-indigo-500/10 transition hover:bg-indigo-500 hover:shadow-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {activeRequestId === 'cropped-image'
@@ -485,7 +509,7 @@ export const ImageCropper: React.FC<ImageCropperProps> = ({ onSuccess, discordWe
             </div>
             <ResultActions
               assets={[{ url: result.url, name: result.fileName }]}
-              disabled={isProcessing}
+              disabled={isBusy}
               label={`${result.fileName} 이어 편집`}
             />
           </div>

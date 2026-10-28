@@ -23,6 +23,9 @@ import { useMediaReceiver } from '@/hooks/useMediaTransfer';
 import { ResultActions } from './ResultActions';
 import { collectImageBatchParts, runImageBatch, selectImageBatchItems, type ImageBatchFileState, type ImageBatchMode } from '@/lib/imageBatch';
 import { ImageBatchStatus } from './ImageBatchStatus';
+import { useMediaWorkspace } from '@/hooks/useMediaWorkspace';
+import { MediaWorkspaceNotice } from './MediaWorkspaceNotice';
+import { DownloadZipButton } from './DownloadZipButton';
 
 interface ImageSplitterProps {
   onSuccess: (size: number) => void;
@@ -48,6 +51,14 @@ interface SplitResult {
   height: number;
   column: number;
   row: number;
+}
+
+interface SplitWorkspaceSnapshot {
+  images: SourceImage[];
+  columns: number;
+  rows: number;
+  results: SplitResult[];
+  fileStates: Record<string, ImageBatchFileState>;
 }
 
 const SUPPORTED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -97,6 +108,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   const [columns, setColumns] = useState(1);
   const [rows, setRows] = useState(1);
   const [results, setResults] = useState<SplitResult[]>([]);
+  const [zipBusy, setZipBusy] = useState(false);
   const [fileStates, setFileStates] = useState<Record<string, ImageBatchFileState>>({});
   const [processingTotalParts, setProcessingTotalParts] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -114,7 +126,19 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
   const nextInputIdRef = useRef(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
-  const isBusy = isProcessing || isLoading || activeRequestId !== null;
+  const workspace = useMediaWorkspace<SplitWorkspaceSnapshot>({
+    tool: 'split', snapshot: { images, columns, rows, results, fileStates }, busy: isProcessing || isLoading,
+    restore: (saved) => {
+      inputUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      resultUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      inputUrlsRef.current = new Set(saved.images.map((image) => image.url));
+      resultUrlsRef.current = new Set(saved.results.map((result) => result.url));
+      nextInputIdRef.current = Math.max(0, ...saved.images.map((image) => Number(image.id.match(/^split-input-(\d+)$/)?.[1] ?? -1) + 1));
+      setImages(saved.images); setColumns(saved.columns); setRows(saved.rows); setResults(saved.results); setFileStates(saved.fileStates);
+      setCancellationMessage(Object.values(saved.fileStates).some((state) => state.status === 'cancelled') ? '중단된 작업을 복원했습니다. 완료 결과를 다운로드하거나 남은 파일을 이어서 처리하세요.' : '');
+    },
+  });
+  const isBusy = !workspace.ready || zipBusy || isProcessing || isLoading || activeRequestId !== null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -371,6 +395,7 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
 
   return (
     <div className="space-y-8">
+      <MediaWorkspaceNotice state={workspace} />
       {isLoading && images.length > 0 && <p role="status" className="text-xs text-purple-300">이미지 불러오는 중...</p>}
       {images.length === 0 ? (
         <div
@@ -555,7 +580,8 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                   </div>
                 </div>
 
-                <DiscordSendStatus status={discordStatus} />
+              <DownloadZipButton assets={results.map((result) => ({ url: result.url, name: result.fileName }))} filename="vyvyd-image-parts.zip" disabled={isBusy} onBusyChange={setZipBusy} />
+              <DiscordSendStatus status={discordStatus} />
 
                 {results.length > 1 && (
                   <ResultActions

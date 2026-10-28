@@ -25,6 +25,10 @@ import { optimizeToTargetSize, parseTargetSize, type TargetEncodingSettings } fr
 import { runImageBatch, selectImageBatchItems, type ImageBatchFileState, type ImageBatchMode } from '@/lib/imageBatch';
 import { ImageBatchStatus } from './ImageBatchStatus';
 import { SettingsPresets } from './SettingsPresets';
+import type { ImageResizePresetSettings } from '@/lib/settingsPresets';
+import { useMediaWorkspace } from '@/hooks/useMediaWorkspace';
+import { MediaWorkspaceNotice } from './MediaWorkspaceNotice';
+import { DownloadZipButton } from './DownloadZipButton';
 
 interface ImageResizerProps {
   onSuccess: (size: number) => void;
@@ -58,6 +62,12 @@ interface ResizeResult {
     quality?: number;
     colors?: number;
   };
+}
+
+interface ResizeWorkspaceSnapshot extends ImageResizePresetSettings {
+  imageItems: ImageItem[];
+  results: ResizeResult[];
+  fileStates: Record<string, ImageBatchFileState>;
 }
 
 const SUPPORTED_INPUT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -136,6 +146,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const [fileStates, setFileStates] = useState<Record<string, ImageBatchFileState>>({});
   const [progressMessage, setProgressMessage] = useState('');
   const [results, setResults] = useState<ResizeResult[]>([]);
+  const [zipBusy, setZipBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [cancellationMessage, setCancellationMessage] = useState('');
   const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
@@ -146,7 +157,24 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
   const nextInputIdRef = useRef(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
-  const isBusy = isProcessing || isLoadingImages || activeRequestId !== null;
+  const workspace = useMediaWorkspace<ResizeWorkspaceSnapshot>({
+    tool: 'resize',
+    snapshot: { imageItems, results, fileStates, resizeMode, percentage, maxWidth, maxHeight, outputFormat, quality, targetSizeEnabled, targetSizeValue, targetSizeUnit },
+    busy: isProcessing || isLoadingImages,
+    restore: (saved) => {
+      inputUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      resultUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      inputUrlsRef.current = new Set(saved.imageItems.map((item) => item.src));
+      resultUrlsRef.current = new Set(saved.results.map((result) => result.url));
+      nextInputIdRef.current = Math.max(0, ...saved.imageItems.map((item) => Number(item.id.match(/^resize-input-(\d+)$/)?.[1] ?? -1) + 1));
+      setImageItems(saved.imageItems); setResults(saved.results); setFileStates(saved.fileStates);
+      setResizeMode(saved.resizeMode); setPercentage(saved.percentage); setMaxWidth(saved.maxWidth); setMaxHeight(saved.maxHeight);
+      setOutputFormat(saved.outputFormat); setQuality(saved.quality); setTargetSizeEnabled(saved.targetSizeEnabled);
+      setTargetSizeValue(saved.targetSizeValue); setTargetSizeUnit(saved.targetSizeUnit);
+      setCancellationMessage(Object.values(saved.fileStates).some((state) => state.status === 'cancelled') ? '중단된 작업을 복원했습니다. 완료 결과를 다운로드하거나 남은 파일을 이어서 처리하세요.' : '');
+    },
+  });
+  const isBusy = !workspace.ready || zipBusy || isProcessing || isLoadingImages || activeRequestId !== null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -474,6 +502,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
 
   return (
     <div className="space-y-8">
+      <MediaWorkspaceNotice state={workspace} />
       <SettingsPresets
         tool="image-resize"
         settings={{ resizeMode, percentage, maxWidth, maxHeight, outputFormat, quality, targetSizeEnabled, targetSizeValue, targetSizeUnit }}
@@ -794,6 +823,7 @@ export const ImageResizer: React.FC<ImageResizerProps> = ({ onSuccess, discordWe
                   )}
                 </div>
 
+                <DownloadZipButton assets={results.map((result) => ({ url: result.url, name: result.downloadName }))} filename="vyvyd-resized-images.zip" disabled={isBusy} onBusyChange={setZipBusy} />
                 <DiscordSendStatus status={discordStatus} />
 
                 {results.length > 1 && (

@@ -25,6 +25,8 @@ import { isAbortError, throwIfAborted } from '@/lib/cancellation';
 import { CancelProcessingButton } from './CancelProcessingButton';
 import { useMediaReceiver } from '@/hooks/useMediaTransfer';
 import { ResultActions } from './ResultActions';
+import { useMediaWorkspace } from '@/hooks/useMediaWorkspace';
+import { MediaWorkspaceNotice } from './MediaWorkspaceNotice';
 
 interface MediaMergerProps {
   onSuccess: (size: number) => void;
@@ -87,7 +89,23 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
   const mountedRef = useRef(false);
   const operationRef = useRef(false);
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
-  const busy = isLoading || isProcessing || activeRequestId !== null;
+  const workspace = useMediaWorkspace({
+    tool: 'merge',
+    snapshot: { sources, mode, direction, fit, alignment, result },
+    busy: isLoading || isProcessing,
+    restore: (saved) => {
+      inputUrlsRef.current = new Set(saved.sources.map((source) => source.url));
+      resultUrlRef.current = saved.result?.url ?? null;
+      nextIdRef.current = Math.max(0, ...saved.sources.map((source) => Number(source.id.replace(/^source-/, '')) || 0), Number(saved.result?.id.replace(/^result-/, '')) || 0);
+      setSources(saved.sources);
+      setMode(saved.mode);
+      setDirection(saved.direction);
+      setFit(saved.fit);
+      setAlignment(saved.alignment);
+      setResult(saved.result);
+    },
+  });
+  const busy = !workspace.ready || isLoading || isProcessing || activeRequestId !== null;
   const mediaLabel = mode === 'gif' ? 'GIF' : '이미지';
 
   useEffect(() => {
@@ -345,6 +363,7 @@ export const MediaMerger: React.FC<MediaMergerProps> = ({ onSuccess, discordWebh
 
   return (
     <div className="space-y-6">
+      <MediaWorkspaceNotice state={workspace} />
       <div className="space-y-2">
         <div className="grid grid-cols-2 gap-3" role="group" aria-label="합칠 파일 종류">
           {([{ value: 'image', label: '이미지 합치기', icon: Images }, { value: 'gif', label: 'GIF 합치기', icon: Film }] as const).map((option) => (

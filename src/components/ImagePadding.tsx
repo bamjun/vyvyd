@@ -13,6 +13,9 @@ import { useMediaTransfer } from '@/hooks/useMediaTransfer';
 import { getImagePaddingLayout, type ImagePaddingAlignment } from '@/lib/imagePadding';
 import { runImageBatch, selectImageBatchItems, type ImageBatchFileState, type ImageBatchMode } from '@/lib/imageBatch';
 import { ImageBatchStatus } from './ImageBatchStatus';
+import { useMediaWorkspace } from '@/hooks/useMediaWorkspace';
+import { MediaWorkspaceNotice } from './MediaWorkspaceNotice';
+import { DownloadZipButton } from './DownloadZipButton';
 
 interface ImagePaddingProps {
   onSuccess: (size: number) => void;
@@ -73,6 +76,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   const [progressIndex, setProgressIndex] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const [results, setResults] = useState<ImageResult[]>([]);
+  const [zipBusy, setZipBusy] = useState(false);
   const [fileStates, setFileStates] = useState<Record<string, ImageBatchFileState>>({});
   const [processingTotal, setProcessingTotal] = useState(0);
   const [errorMessage, setErrorMessage] = useState('');
@@ -84,7 +88,21 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
   const busyRef = useRef(false);
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
   const { busy: isTransferring } = useMediaTransfer();
-  const isBusy = isLoadingImages || isProcessing || activeRequestId !== null || isTransferring;
+  const workspace = useMediaWorkspace({
+    tool: 'padding',
+    snapshot: { imageItems, background, alignment, results, fileStates },
+    busy: isLoadingImages || isProcessing,
+    restore: (saved) => {
+      imageUrlsRef.current = new Set(saved.imageItems.map((item) => item.src));
+      resultUrlsRef.current = new Set(saved.results.map((item) => item.url));
+      setImageItems(saved.imageItems);
+      setBackground(saved.background);
+      setAlignment(saved.alignment);
+      setResults(saved.results);
+      setFileStates(saved.fileStates);
+    },
+  });
+  const isBusy = !workspace.ready || zipBusy || isLoadingImages || isProcessing || activeRequestId !== null || isTransferring;
 
   useEffect(() => {
     return () => {
@@ -292,6 +310,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
 
   return (
     <div className="space-y-8">
+      <MediaWorkspaceNotice state={workspace} />
       {imageItems.length === 0 ? (
         <div className="flex flex-col items-center justify-center border-2 border-dashed border-purple-500/20 hover:border-purple-500/50 rounded-2xl p-12 bg-white/5 transition duration-300">
           <ImagePlus className="w-16 h-16 text-purple-400 mb-4 animate-pulse" />
@@ -493,6 +512,7 @@ export const ImagePadding: React.FC<ImagePaddingProps> = ({ onSuccess, discordWe
                     </div>
                   )}
                 </div>
+                <DownloadZipButton assets={results.map((result) => ({ url: result.url, name: result.outputName }))} filename="vyvyd-padded-images.zip" disabled={isBusy} onBusyChange={setZipBusy} />
                 <DiscordSendStatus status={discordStatus} />
                 {results.length > 1 && (
                   <ResultActions

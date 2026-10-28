@@ -106,6 +106,9 @@ const mountTool = (name, { encode, beforeObjectUrl } = {}) => {
     './ResultActions': { ResultActions: 'ResultActions' },
     './TargetSizeControl': { TargetSizeControl: 'TargetSizeControl' },
     './SettingsPresets': { SettingsPresets: 'SettingsPresets' },
+    './MediaWorkspaceNotice': { MediaWorkspaceNotice: 'MediaWorkspaceNotice' },
+    './DownloadZipButton': { DownloadZipButton: 'DownloadZipButton' },
+    '@/hooks/useMediaWorkspace': { useMediaWorkspace: () => ({ ready: true, saving: false, error: '', restored: false, updatedAt: null, clearSaved: async () => {} }) },
     './ImageBatchStatus': { ImageBatchStatus: 'ImageBatchStatus' },
     './CancelProcessingButton': { CancelProcessingButton: 'CancelProcessingButton' },
     '@/hooks/useDiscordWebhookSender': {

@@ -28,6 +28,9 @@ import {
   hasValidVideoOutputSize, hasValidVideoSettings, resizeVideoSettings, setVideoAspectLocked,
 } from '@/lib/videoSettings';
 import type { VideoEditSettings } from '@/lib/videoSettings';
+import { useMediaWorkspace } from '@/hooks/useMediaWorkspace';
+import { MediaWorkspaceNotice } from './MediaWorkspaceNotice';
+import { DownloadZipButton } from './DownloadZipButton';
 
 interface VideoToGifProps {
   onSuccess: (size: number) => void;
@@ -66,6 +69,20 @@ interface ConvertedVideo {
   width: number;
   height: number;
   optimization?: GifResult['optimization'];
+}
+
+interface VideoWorkspaceSnapshot {
+  videoItems: VideoItem[];
+  selectedVideoId: string;
+  showCrop: boolean;
+  fps: number;
+  dither: string;
+  targetEnabled: boolean;
+  targetValue: string;
+  targetUnit: 'KB' | 'MB';
+  defaultOutputPreset: VideoGifPresetSettings['output'];
+  results: GifResult[];
+  fileStates: Record<string, VideoBatchFileState>;
 }
 
 const EMPTY_SETTINGS = createVideoSettings({ width: 1, height: 1, duration: 1 });
@@ -111,6 +128,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const [progressTotal, setProgressTotal] = useState(0);
   const [fileStates, setFileStates] = useState<Record<string, VideoBatchFileState>>({});
   const [results, setResults] = useState<GifResult[]>([]);
+  const [zipBusy, setZipBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -122,6 +140,22 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   const { beginTask, finishTask, cancelTask, isCancelling } = useProcessingTask();
   const { activeRequestId, status: discordStatus, send: sendToDiscord } = useDiscordWebhookSender(discordWebhookUrl);
   const { notice: transferNotice } = useMediaTransfer();
+  const workspace = useMediaWorkspace<VideoWorkspaceSnapshot>({
+    tool: 'video',
+    snapshot: { videoItems, selectedVideoId, showCrop, fps, dither, targetEnabled, targetValue, targetUnit, defaultOutputPreset, results, fileStates },
+    busy: isProcessing || isLoadingVideos,
+    restore: (saved) => {
+      inputUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      resultUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      inputUrlsRef.current = new Set(saved.videoItems.map((item) => item.src));
+      resultUrlsRef.current = new Set(saved.results.map((result) => result.url));
+      setVideoItems(saved.videoItems); setSelectedVideoId(saved.selectedVideoId); setShowCrop(saved.showCrop);
+      setFps(saved.fps); setDither(saved.dither); setTargetEnabled(saved.targetEnabled); setTargetValue(saved.targetValue); setTargetUnit(saved.targetUnit);
+      setDefaultOutputPreset(saved.defaultOutputPreset); setResults(saved.results); setFileStates(saved.fileStates);
+      setProgressMsg(Object.values(saved.fileStates).some((state) => state.status === 'cancelled') ? '중단된 작업을 복원했습니다. 완료 결과를 다운로드하거나 남은 파일을 이어서 변환하세요.' : '');
+    },
+  });
+  const isBusy = !workspace.ready || zipBusy || isProcessing || isLoadingVideos || activeRequestId !== null;
   const selectedVideo = videoItems.find((item) => item.id === selectedVideoId) ?? videoItems[0];
   const settings = selectedVideo?.settings ?? EMPTY_SETTINGS;
   const { crop, cropPreset = 'free', startTime, endTime, outputWidth, outputHeight, scale, aspectLocked, fitMode } = settings;
@@ -147,7 +181,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   const reset = () => {
-    if (isProcessing || loadingRef.current) return;
+    if (isBusy || loadingRef.current) return;
     clearUrls(inputUrlsRef.current);
     clearUrls(resultUrlsRef.current);
     setVideoItems([]);
@@ -162,7 +196,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   useMediaReceiver('video', async (files) => {
-    if (isProcessing || loadingRef.current) throw new Error('영상 도구가 처리 중입니다. 완료한 뒤 다시 전달해 주세요.');
+    if (isBusy || loadingRef.current) throw new Error('영상 도구를 복원하거나 처리 중입니다. 완료한 뒤 다시 전달해 주세요.');
     loadingRef.current = true;
     setIsLoadingVideos(true);
     const stagedUrls = new Set<string>();
@@ -193,7 +227,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith('video/'));
-    if (files.length === 0 || isProcessing || loadingRef.current) return;
+    if (files.length === 0 || isBusy || loadingRef.current) return;
 
     reset();
     loadingRef.current = true;
@@ -240,7 +274,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   const updateSelectedSettings = (update: (current: VideoEditSettings) => VideoEditSettings) => {
-    if (!selectedVideo || isProcessing) return;
+    if (!selectedVideo || isBusy) return;
     setVideoItems((items) => items.map((item) => item.id === selectedVideo.id
       ? { ...item, settings: update(item.settings) } : item));
     setSettingsNotice('');
@@ -278,7 +312,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   const applyOutputToAll = () => {
-    if (isProcessing || !hasValidVideoOutputSize(settings)) return;
+    if (isBusy || !hasValidVideoOutputSize(settings)) return;
     setVideoItems((items) => items.map((item) => ({
       ...item, settings: applyVideoOutputSettings(item.settings, settings),
     })));
@@ -286,7 +320,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   const applySettingsPreset = (preset: VideoGifPresetSettings) => {
-    if (isProcessing || loadingRef.current || activeRequestId !== null) return;
+    if (isBusy || loadingRef.current) return;
     setFps(preset.fps); setDither(preset.dither);
     setTargetEnabled(preset.targetSizeEnabled); setTargetValue(preset.targetSizeValue); setTargetUnit(preset.targetSizeUnit);
     setDefaultOutputPreset(preset.output);
@@ -303,7 +337,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
   };
 
   const convertToGif = async (targets: VideoItem[], preserveResults = false) => {
-    if (targets.length === 0 || isProcessing || loadingRef.current) return;
+    if (targets.length === 0 || isBusy || loadingRef.current) return;
 
     if (invalidSizeTarget) {
       setErrorMessage('목표 용량을 1 KB에서 100 MB 사이로 입력해 주세요.');
@@ -468,12 +502,13 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
 
   return (
     <div className="space-y-8">
+      <MediaWorkspaceNotice state={workspace} />
       {transferNotice?.target === 'video' && <p role="status" className="rounded-xl border border-purple-400/20 p-3 text-sm text-purple-200">{transferNotice.message}</p>}
       <div className="space-y-2">
-        <SettingsPresets tool="video-gif" settings={presetSettings} onApply={applySettingsPreset} disabled={isProcessing || isLoadingVideos || activeRequestId !== null} />
+        <SettingsPresets tool="video-gif" settings={presetSettings} onApply={applySettingsPreset} disabled={isBusy} />
         <p className="text-xs leading-relaxed text-gray-500">FPS·디더링·목표 용량은 모든 영상에, 출력 크기는 선택한 영상과 이후 추가하는 영상에 적용합니다. 비율 잠금 시 저장한 가로 크기에 맞춰 세로 크기를 계산합니다. 파일이 없으면 이전에 불러온 출력 설정도 함께 저장합니다.</p>
       </div>
-      <input ref={fileInputRef} type="file" accept="video/mp4,video/*" multiple onChange={handleFileChange} disabled={isProcessing || isLoadingVideos} className="hidden" aria-label="동영상 파일 선택" />
+      <input ref={fileInputRef} type="file" accept="video/mp4,video/*" multiple onChange={handleFileChange} disabled={isBusy} className="hidden" aria-label="동영상 파일 선택" />
       {!selectedVideo ? (
         <div className="flex flex-col items-center justify-center border-2 border-dashed border-purple-500/20 hover:border-purple-500/50 rounded-2xl p-12 bg-white/5 transition duration-300">
           <Film className="w-16 h-16 text-purple-400 mb-4 animate-pulse" />
@@ -481,7 +516,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
           <p className="text-gray-400 text-sm mb-6 text-center max-w-sm">
             여러 영상을 선택해 각 영상의 비율을 유지한 GIF로 변환합니다. 파일별로 자르기 영역과 출력 크기를 조정할 수 있습니다.
           </p>
-          <button type="button" disabled={isLoadingVideos} onClick={() => fileInputRef.current?.click()} className="px-6 py-3 bg-purple-600 hover:bg-purple-700 font-medium rounded-xl cursor-pointer shadow-lg hover:shadow-purple-500/20 transition disabled:opacity-50">
+          <button type="button" disabled={isBusy} onClick={() => fileInputRef.current?.click()} className="px-6 py-3 bg-purple-600 hover:bg-purple-700 font-medium rounded-xl cursor-pointer shadow-lg hover:shadow-purple-500/20 transition disabled:opacity-50">
             Choose Video Files
           </button>
           {isLoadingVideos && <p className="text-xs text-purple-300 mt-4">영상 메타데이터 불러오는 중...</p>}
@@ -499,7 +534,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
               </div>
               <button
                 onClick={reset}
-                disabled={isProcessing}
+                disabled={isBusy}
                 className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50 flex items-center space-x-1"
               >
                 <RefreshCw className="w-3 h-3" />
@@ -512,7 +547,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                 <p className="mb-3 text-xs text-gray-400">영상을 선택해 파일별 설정을 편집하세요.</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                   {videoItems.map((item, index) => (
-                    <button key={item.id} type="button" aria-label={`${index + 1}. ${item.file.name} 편집`} aria-pressed={item.id === selectedVideo.id} disabled={isProcessing} onClick={() => { videoRef.current?.pause(); setSelectedVideoId(item.id); setSettingsNotice(''); }} className={`min-w-0 rounded-xl border p-2 space-y-2 text-left disabled:opacity-50 ${item.id === selectedVideo.id ? 'border-purple-400 bg-purple-500/15' : 'border-white/10 bg-[#252733] hover:border-purple-500/50'}`}>
+                    <button key={item.id} type="button" aria-label={`${index + 1}. ${item.file.name} 편집`} aria-pressed={item.id === selectedVideo.id} disabled={isBusy} onClick={() => { videoRef.current?.pause(); setSelectedVideoId(item.id); setSettingsNotice(''); }} className={`min-w-0 rounded-xl border p-2 space-y-2 text-left disabled:opacity-50 ${item.id === selectedVideo.id ? 'border-purple-400 bg-purple-500/15' : 'border-white/10 bg-[#252733] hover:border-purple-500/50'}`}>
                       <div className="aspect-video rounded-lg overflow-hidden bg-black/30 flex items-center justify-center">
                         <video src={item.src} muted playsInline preload="metadata" className="max-h-full max-w-full object-contain" />
                       </div>
@@ -539,7 +574,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                     playsInline
                     onLoadedMetadata={(event) => { event.currentTarget.currentTime = startTime; }}
                   />
-                  {selectedVideo.width > 0 && !isProcessing && showCrop && (
+                  {selectedVideo.width > 0 && !isBusy && showCrop && (
                     <CropOverlay
                       key={`crop-${selectedVideo.id}`}
                       mediaWidth={selectedVideo.width}
@@ -555,12 +590,12 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                   <span>Original size: {selectedVideo.width}x{selectedVideo.height}</span>
                   <span>Crop: X:{crop.x}, Y:{crop.y}, {crop.width}x{crop.height}</span>
                 </div>
-                <button onClick={resetCrop} disabled={isProcessing} className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50 flex items-center space-x-1">
+                <button onClick={resetCrop} disabled={isBusy} className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50 flex items-center space-x-1">
                   <RefreshCw className="w-3 h-3" />
                   <span>이 영상의 자르기 영역 초기화</span>
                 </button>
                 <label className="flex items-center gap-2 text-xs text-gray-400">
-                  <input type="checkbox" checked={showCrop} onChange={(event) => setShowCrop(event.target.checked)} disabled={isProcessing} className="accent-purple-500" />
+                  <input type="checkbox" checked={showCrop} onChange={(event) => setShowCrop(event.target.checked)} disabled={isBusy} className="accent-purple-500" />
                   자르기 영역 표시 (끄면 영상 재생·탐색 가능)
                 </label>
                 <VideoOutputPreview sourceId={selectedVideo.id} videoRef={videoRef} crop={crop} outputWidth={outputWidth} outputHeight={outputHeight} fitMode={fitMode} />
@@ -574,7 +609,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                 <span>선택한 영상 설정</span>
               </h3>
 
-              <fieldset disabled={isProcessing} className="space-y-5 disabled:opacity-60">
+              <fieldset disabled={isBusy} className="space-y-5 disabled:opacity-60">
                 <div>
                   <label className="block text-xs font-semibold uppercase text-gray-400 mb-2">Trim Duration</label>
                   <div className="grid grid-cols-2 gap-4">
@@ -618,7 +653,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                 <div>
                   <label className="block text-xs font-semibold uppercase text-gray-400 mb-2">Crop Area (source px)</label>
                   <div className="mb-4">
-                    <CropPresetControls preset={cropPreset} onPresetChange={applyCropPreset} onCenter={() => handleCropChange(centerCrop(crop, selectedVideo))} disabled={isProcessing} />
+                    <CropPresetControls preset={cropPreset} onPresetChange={applyCropPreset} onCenter={() => handleCropChange(centerCrop(crop, selectedVideo))} disabled={isBusy} />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
@@ -631,7 +666,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                         step={1}
                         value={crop.x}
                         onChange={(event) => updateCropField('x', event.target.value)}
-                        disabled={isProcessing}
+                        disabled={isBusy}
                         className="w-full bg-[#121318] border border-purple-500/30 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
                       />
                     </div>
@@ -645,7 +680,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                         step={1}
                         value={crop.y}
                         onChange={(event) => updateCropField('y', event.target.value)}
-                        disabled={isProcessing}
+                        disabled={isBusy}
                         className="w-full bg-[#121318] border border-purple-500/30 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
                       />
                     </div>
@@ -659,7 +694,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                         step={1}
                         value={crop.width}
                         onChange={(event) => updateCropField('width', event.target.value)}
-                        disabled={isProcessing}
+                        disabled={isBusy}
                         className="w-full bg-[#121318] border border-purple-500/30 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
                       />
                     </div>
@@ -673,7 +708,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                         step={1}
                         value={crop.height}
                         onChange={(event) => updateCropField('height', event.target.value)}
-                        disabled={isProcessing}
+                        disabled={isBusy}
                         className="w-full bg-[#121318] border border-purple-500/30 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
                       />
                     </div>
@@ -684,7 +719,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                 <VideoOutputSettings
                   outputWidth={outputWidth} outputHeight={outputHeight}
                   aspectLocked={aspectLocked} fitMode={fitMode} scale={scale}
-                  disabled={isProcessing}
+                  disabled={isBusy}
                   onDimensionChange={(field, value) => updateSelectedSettings((current) => changeOutputDimension(current, field, value))}
                   onAspectLockedChange={(locked) => updateSelectedSettings((current) => setVideoAspectLocked(current, locked))}
                   onFitModeChange={(mode) => updateSelectedSettings((current) => ({ ...current, fitMode: mode }))}
@@ -715,7 +750,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                     id="video-dither"
                     value={dither}
                     onChange={(event) => setDither(event.target.value)}
-                    disabled={isProcessing}
+                    disabled={isBusy}
                     className="w-full bg-[#121318] border border-white/10 rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-purple-500 transition disabled:opacity-50"
                   >
                     <option value="bayer">Bayer (Recommended)</option>
@@ -728,7 +763,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                   enabled={targetEnabled}
                   value={targetValue}
                   unit={targetUnit}
-                  disabled={isProcessing}
+                  disabled={isBusy}
                   onEnabledChange={setTargetEnabled}
                   onValueChange={setTargetValue}
                   onUnitChange={setTargetUnit}
@@ -750,7 +785,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
               ) : (
                 <button
                   onClick={() => void convertToGif(videoItems)}
-                  disabled={Boolean(invalidVideo) || invalidSizeTarget}
+                  disabled={isBusy || Boolean(invalidVideo) || invalidSizeTarget}
                   className="w-full py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 font-medium rounded-xl shadow-lg shadow-purple-500/10 hover:shadow-purple-500/25 disabled:opacity-50 disabled:cursor-not-allowed transition duration-300 flex items-center justify-center space-x-2"
                 >
                   <Sparkles className="w-5 h-5 animate-pulse" />
@@ -763,7 +798,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
               <section aria-label="변환 실패 파일" className="glass-panel rounded-2xl border border-red-500/20 p-5 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h3 className="text-sm font-semibold text-red-300">실패 {failedEntries.length}개</h3>
-                  <button type="button" onClick={() => void convertToGif(failedEntries.map(({ item }) => item), true)} disabled={isProcessing || invalidSizeTarget} className="rounded-lg bg-purple-600 px-3 py-2 text-xs font-medium hover:bg-purple-500 disabled:opacity-50">실패 {failedEntries.length}개만 다시 시도</button>
+                  <button type="button" onClick={() => void convertToGif(failedEntries.map(({ item }) => item), true)} disabled={isBusy || invalidSizeTarget} className="rounded-lg bg-purple-600 px-3 py-2 text-xs font-medium hover:bg-purple-500 disabled:opacity-50">실패 {failedEntries.length}개만 다시 시도</button>
                 </div>
                 <p className="text-xs text-gray-400">완료된 GIF는 유지됩니다. 설정을 수정한 뒤 다시 시도할 수 있습니다.</p>
                 <ul className="space-y-3">
@@ -772,8 +807,8 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                       <p className="break-all text-sm text-gray-200">{item.file.name}</p>
                       <p className="text-xs text-red-300">{message}</p>
                       <div className="flex flex-wrap gap-2">
-                        <button type="button" aria-label={`${item.file.name} 설정 수정`} onClick={() => { videoRef.current?.pause(); setSelectedVideoId(item.id); }} disabled={isProcessing} className="rounded-lg border border-white/10 px-3 py-2 text-xs text-gray-300 hover:bg-white/5 disabled:opacity-50">설정 수정</button>
-                        <button type="button" aria-label={`${item.file.name} 다시 시도`} onClick={() => void convertToGif([item], true)} disabled={isProcessing || invalidSizeTarget} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">다시 시도</button>
+                        <button type="button" aria-label={`${item.file.name} 설정 수정`} onClick={() => { videoRef.current?.pause(); setSelectedVideoId(item.id); }} disabled={isBusy} className="rounded-lg border border-white/10 px-3 py-2 text-xs text-gray-300 hover:bg-white/5 disabled:opacity-50">설정 수정</button>
+                        <button type="button" aria-label={`${item.file.name} 다시 시도`} onClick={() => void convertToGif([item], true)} disabled={isBusy || invalidSizeTarget} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">다시 시도</button>
                       </div>
                     </li>
                   ))}
@@ -783,7 +818,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
             {cancelledItems.length > 0 && !isProcessing && (
               <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-3">
                 <p className="text-xs text-gray-400">아직 완료하지 못한 파일이 {cancelledItems.length}개 있습니다.</p>
-                <button type="button" onClick={() => void convertToGif(cancelledItems, true)} disabled={invalidSizeTarget} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">남은 {cancelledItems.length}개 이어서 변환</button>
+                <button type="button" onClick={() => void convertToGif(cancelledItems, true)} disabled={isBusy || invalidSizeTarget} className="rounded-lg border border-purple-500/30 px-3 py-2 text-xs text-purple-300 hover:bg-purple-500/10 disabled:opacity-50">남은 {cancelledItems.length}개 이어서 변환</button>
               </div>
             )}
 
@@ -807,7 +842,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                       <button
                         type="button"
                         onClick={sendAllToDiscord}
-                        disabled={activeRequestId !== null}
+                        disabled={isBusy}
                         className="flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 px-3 py-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {activeRequestId === 'all' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -816,11 +851,12 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                     </div>
                   )}
                 </div>
+                <DownloadZipButton assets={results.map((result) => ({ url: result.url, name: getGifFileName(result.fileName) }))} filename="vyvyd-gifs.zip" disabled={isBusy} onBusyChange={setZipBusy} />
                 <DiscordSendStatus status={discordStatus} />
                 {results.length > 1 && (
                   <ResultActions
                     assets={results.map((result) => ({ url: result.url, name: getGifFileName(result.fileName) }))}
-                    disabled={isProcessing || isLoadingVideos}
+                    disabled={isBusy}
                     label="모든 결과 이어 편집"
                   />
                 )}
@@ -846,7 +882,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                           <button
                             type="button"
                             onClick={() => sendResultToDiscord(result)}
-                            disabled={activeRequestId !== null}
+                            disabled={isBusy}
                             className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 transition disabled:cursor-not-allowed disabled:opacity-50"
                             aria-label={`${result.fileName} GIF Discord로 보내기`}
                             title="Discord로 보내기"
@@ -867,7 +903,7 @@ export const VideoToGif: React.FC<VideoToGifProps> = ({ onSuccess, discordWebhoo
                       )}
                       <ResultActions
                         assets={[{ url: result.url, name: getGifFileName(result.fileName) }]}
-                        disabled={isProcessing || isLoadingVideos}
+                        disabled={isBusy}
                         label={`${getGifFileName(result.fileName)} 이어 편집`}
                       />
                     </div>

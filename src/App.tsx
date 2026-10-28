@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { VideoToGif } from './components/VideoToGif';
 import { ImageEditor } from './components/ImageEditor';
 import { DiscordWebhookField } from './components/DiscordWebhookField';
@@ -6,18 +6,33 @@ import { DiscordUrlFormatter } from './components/DiscordUrlFormatter';
 import { getDiscordWebhookFromSearch, getStoredDiscordWebhooks } from './lib/discordWebhook';
 import { MediaTransferProvider } from './hooks/useMediaTransfer';
 import type { EditorMode } from './components/ImageEditor';
+import { RecentMediaWorkspaces } from './components/RecentMediaWorkspaces';
 import { Film, Images, Link2, ShieldAlert, Sparkles, Zap, HardDrive, CheckCircle } from 'lucide-react';
 
 const StudioProofPanel = lazy(() => import('./features/studio/StudioProofPanel'));
 const StudioPanel = lazy(() => import('./features/studio/StudioPanel'));
+const navigationKey = 'vyvyd:media-navigation:v1';
+const readMediaNavigation = (): { tab: 'video' | 'editor'; mode: EditorMode } => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(navigationKey) ?? 'null');
+    if (saved && (saved.tab === 'video' || saved.tab === 'editor') && ['padding', 'resize', 'split', 'crop', 'merge'].includes(saved.mode)) return saved;
+  } catch { /* The media workspace remains usable without navigation storage. */ }
+  return { tab: 'editor', mode: 'resize' };
+};
 
 function App() {
   const showProof = import.meta.env.DEV && new URLSearchParams(window.location.search).has('studioProof');
   const [activeTab, setActiveTab] = useState<'video' | 'editor' | 'formatter' | 'studio'>(
-    () => new URLSearchParams(window.location.search).has('studio') || showProof ? 'studio' : 'editor',
+    () => new URLSearchParams(window.location.search).has('studio') || showProof ? 'studio' : readMediaNavigation().tab,
   );
   const [studioVisited, setStudioVisited] = useState(activeTab === 'studio');
-  const [editorMode, setEditorMode] = useState<EditorMode>('resize');
+  const [editorMode, setEditorMode] = useState<EditorMode>(() => readMediaNavigation().mode);
+  useEffect(() => {
+    if (activeTab === 'video' || activeTab === 'editor') {
+      try { localStorage.setItem(navigationKey, JSON.stringify({ tab: activeTab, mode: editorMode })); }
+      catch { /* Tool notices report file-storage failures independently. */ }
+    }
+  }, [activeTab, editorMode]);
   const discordWebhookFromUrl = getDiscordWebhookFromSearch(window.location.search);
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(
     () => discordWebhookFromUrl || getStoredDiscordWebhooks()[0] || '',
@@ -141,6 +156,12 @@ function App() {
           />
         )}
 
+        <RecentMediaWorkspaces onOpen={(tool) => {
+          if (tool === 'video') setActiveTab('video');
+          else { setEditorMode(tool); setActiveTab('editor'); }
+          requestAnimationFrame(() => document.getElementById(tool === 'video' ? 'video-panel' : 'editor-panel')?.scrollIntoView({ block: 'start' }));
+        }} />
+
         {/* Dynamic Panel Grid */}
         <div className="glass-panel rounded-3xl p-8 shadow-2xl relative overflow-hidden">
           {/* Subtle Ambient Light Effects */}
@@ -183,7 +204,7 @@ function App() {
             <div>
               <h4 className="font-semibold text-gray-200 mb-1">{activeTab === 'studio' ? '이 컴퓨터에 보관' : '브라우저에서 처리'}</h4>
               <p className="text-xs text-gray-400 leading-relaxed">
-                {activeTab === 'studio' ? '프로젝트·이미지·저장 이력·출력 파일은 로컬 서비스가 디스크에 보관합니다. 프로젝트 파일을 다운로드해 다른 컴퓨터로 옮길 수 있습니다.' : '영상·이미지 변환은 브라우저 안에서 실행합니다. Discord 전송은 선택할 때만 실행하며, 페이지를 닫기 전 결과를 다운로드하세요.'}
+                {activeTab === 'studio' ? '프로젝트·이미지·저장 이력·출력 파일은 로컬 서비스가 디스크에 보관합니다. 프로젝트 파일을 다운로드해 다른 컴퓨터로 옮길 수 있습니다.' : '영상·이미지 변환은 브라우저 안에서 실행합니다. 최근 작업에 파일·설정·결과를 보관하며, 새로고침 뒤 이어서 작업할 수 있습니다.'}
               </p>
             </div>
           </div>
