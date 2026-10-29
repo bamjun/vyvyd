@@ -76,3 +76,11 @@ Cloudflare Pages의 기존 `vyvyd` 프로젝트와 `main` production 브랜치�
 - 무결성: `sha512-wpwNmgUDd/RZtT2TdOzXjfdzK3yMksu6QTNqCkKoG3AlfF5JZ3Y0UxbSv8F+UrHt2WgsJ4icmrkZEqOWyZq6iA==`.
 
 기존 설치는 새 패키지를 설치한 뒤 로컬 서비스를 다시 시작하고, 프로젝트에서 **소스 다시 컴파일**을 누릅니다. npm 공개 여부는 [공개 패키지 페이지](https://www.npmjs.com/package/@bamjun/vyvyd-studio)에서 버전을 확인할 수 있습니다.
+
+### 공개 배포 확인
+
+2026-10-29에 계정 `bamjun`으로 위 고정 tarball을 직접 배포하고 npm의 추가 본인 인증을 완료했습니다. 공개 registry의 버전과 `latest`가 모두 `0.1.2`이며, 비로그인으로 내려받은 tarball이 위 검증 파일과 바이트 단위로 일치합니다.
+
+공개 파일을 저장소 밖 임시 폴더에 압축 해제해 CLI `--version`의 `0.1.2` 출력과 `--help` 정상 실행을 확인했습니다. 패키지의 미리보기 소스 생성기도 직접 실행해 크기·회전 핸들에 필요한 측정 정보가 포함됐음을 확인했습니다. 확인 자료는 `artifacts/studio-package/public-registry-0.1.2-report.json`과 `public-cli-0.1.2-report.json`에 보관합니다.
+
+사이트 소스 커밋은 `b100e5a`이며 Cloudflare Pages 운영 배포는 `e12e3402`입니다. [배포 주소](https://e12e3402.vyvyd.pages.dev)와 [운영 주소](https://vyvyd.pages.dev/?studio=1)에서 HTML·JS 응답과 빌드 파일 해시, COOP·COEP 헤더를 확인했습니다.
