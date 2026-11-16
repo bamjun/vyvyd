@@ -9,6 +9,7 @@ import {
   Scissors,
   Send,
   Sparkles,
+  Trash2,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { DiscordSendStatus } from './DiscordSendStatus';
@@ -168,6 +169,28 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
     clearUrls(inputUrlsRef.current);
     clearResults();
     setImages([]);
+    setErrorMessage('');
+  };
+
+  const removeImage = (image: SourceImage) => {
+    if (busyRef.current || isBusy) return;
+
+    URL.revokeObjectURL(image.url);
+    inputUrlsRef.current.delete(image.url);
+    results.filter((result) => result.sourceId === image.id).forEach((result) => {
+      URL.revokeObjectURL(result.url);
+      resultUrlsRef.current.delete(result.url);
+    });
+    setImages((previous) => previous.filter((entry) => entry.id !== image.id));
+    setResults((previous) => previous.filter((result) => result.sourceId !== image.id));
+    setFileStates((previous) => {
+      const next = { ...previous };
+      delete next[image.id];
+      return next;
+    });
+    if (!Object.entries(fileStates).some(([id, state]) => id !== image.id && state.status === 'cancelled')) {
+      setCancellationMessage('');
+    }
     setErrorMessage('');
   };
 
@@ -470,6 +493,16 @@ export const ImageSplitter: React.FC<ImageSplitterProps> = ({ onSuccess, discord
                     <p className="truncate text-xs text-gray-300" title={image.file.name}>{image.file.name}</p>
                     <p className="text-[10px] text-gray-500">{image.width} × {image.height}px</p>
                     <p className="text-[10px] text-purple-300">{columns} × {rows} = {columns * rows}개 조각</p>
+                    <button
+                      type="button"
+                      onClick={() => removeImage(image)}
+                      disabled={isBusy}
+                      aria-label={`${image.file.name} 삭제`}
+                      className="flex w-full items-center justify-center gap-1 rounded-lg border border-white/10 px-2 py-1.5 text-xs text-gray-300 transition hover:border-red-400/50 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      삭제
+                    </button>
                   </div>
                 ))}
               </div>

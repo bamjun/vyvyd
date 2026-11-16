@@ -337,6 +337,49 @@ test('adding a transferred image resumes only the new input and preserves comple
   assert.ok(retained.every(({ url }) => !host.revoked.includes(url)));
 });
 
+test('removing one split source removes only its results and leaves the remaining inputs usable', async () => {
+  const host = mountTool('ImageSplitter');
+  await host.upload(['a.png', 'b.png']);
+  host.find((entry) => entry.type === 'input' && entry.props.id === 'split-columns')
+    .props.onChange({ target: { value: '2' } });
+  host.render();
+  await host.click(/조각 만들기/);
+  const before = host.downloads();
+  const removedParts = before.filter(({ name }) => name.startsWith('a_'));
+  const retainedParts = before.filter(({ name }) => name.startsWith('b_'));
+  assert.equal(removedParts.length, 2);
+  assert.equal(retainedParts.length, 2);
+  const removedInput = host.created.find(({ blob }) => blob instanceof File && blob.name === 'a.png');
+  const retainedInput = host.created.find(({ blob }) => blob instanceof File && blob.name === 'b.png');
+
+  await host.receivers.get('split')([
+    new File([new Uint8Array(1000)], 'c.png', { type: 'image/png', lastModified: 2 }),
+  ]);
+  host.render();
+  host.find((entry) => entry.type === 'button' && entry.props['aria-label'] === 'a.png 삭제').props.onClick();
+  host.render();
+
+  assert.deepEqual(plain(host.status().items.map(({ name }) => name)), ['b.png', 'c.png']);
+  assert.deepEqual(host.downloads(), retainedParts);
+  assert.ok(host.revoked.includes(removedInput.url));
+  assert.ok(removedParts.every(({ url }) => host.revoked.includes(url)));
+  assert.ok(!host.revoked.includes(retainedInput.url));
+  assert.ok(retainedParts.every(({ url }) => !host.revoked.includes(url)));
+  assert.equal(Object.keys(host.status().states).length, 1);
+
+  await host.click(/전체 다시 처리/);
+  assert.deepEqual(host.encodes.map(({ source }) => source), ['a.png', 'a.png', 'b.png', 'b.png', 'b.png', 'b.png', 'c.png', 'c.png']);
+  assert.equal(host.downloads().length, 4);
+  assert.ok(host.downloads().every(({ name }) => !name.startsWith('a_')));
+
+  host.find((entry) => entry.type === 'button' && entry.props['aria-label'] === 'b.png 삭제').props.onClick();
+  host.render();
+  host.find((entry) => entry.type === 'button' && entry.props['aria-label'] === 'c.png 삭제').props.onClick();
+  host.render();
+  assert.ok(host.find((entry) => entry.type === 'input' && entry.props.type === 'file'));
+  assert.deepEqual(host.downloads(), []);
+});
+
 test('split cancellation keeps completed sources and resumes partial sources without publishing duplicate parts', async () => {
   const entered = deferred();
   const release = deferred();
