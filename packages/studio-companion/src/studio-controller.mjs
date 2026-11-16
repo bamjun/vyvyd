@@ -25,6 +25,7 @@ export function createStudioController({store, runtime, origin = () => 'http://1
   const inFlight = new Map();
   const jobs = new Map();
   const restorations = new Map();
+  const historyPreviews = new Map();
   let mcp = {};
   const state = (id) => {
     id = id.toLowerCase();
@@ -149,6 +150,28 @@ export function createStudioController({store, runtime, origin = () => 'http://1
       }
       return controller.status(project.id);
     },
+    async previewVersion(id, revision) {
+      revisionFor(revision);
+      // A historical preview is immutable and never becomes the active project
+      // preview. Deduplicate requests and bound outstanding compilation work.
+      const project = await store.readHistory(id, revision);
+      const key = `${project.id}/${revision}`;
+      if (historyPreviews.has(key)) return historyPreviews.get(key);
+      if (historyPreviews.size >= 4) throw error('HISTORY_PREVIEW_BUSY', '다른 저장 버전의 미리보기를 준비하고 있습니다. 잠시 후 다시 시도해 주세요.', 429);
+      const job = (async () => {
+        try {
+          const existing = await runtime.findSnapshot?.(project, {origin: origin()});
+          return existing ?? await prepare(project);
+        } catch (cause) {
+          if (cause instanceof StudioStoreError) throw cause;
+          const failure = error('HISTORY_PREVIEW_FAILED', cause.message || '저장 버전 미리보기를 준비하지 못했습니다.', 422);
+          failure.diagnostics = cause.diagnostics;
+          throw failure;
+        }
+      })();
+      historyPreviews.set(key, job);
+      try {return await job;} finally {if (historyPreviews.get(key) === job) historyPreviews.delete(key);}
+    },
     async save(id, input) {
       revisionFor(input.expectedRevision);
       const saveCandidate = async (previous, receipt = {}) => {
@@ -243,7 +266,7 @@ export function createStudioController({store, runtime, origin = () => 'http://1
       throw error('UNKNOWN_TOOL', '지원하지 않는 Codex 도구입니다.', 404);
     },
     busy() {return jobs.size > 0 || inFlight.size > 0 || [...states.values()].some((value) => value.state === 'compiling');},
-    async settled() {await Promise.allSettled([...jobs.values(), ...[...inFlight.values()].map((entry) => entry.promise)]);},
+    async settled() {await Promise.allSettled([...jobs.values(), ...historyPreviews.values(), ...[...inFlight.values()].map((entry) => entry.promise)]);},
   };
   return controller;
 }

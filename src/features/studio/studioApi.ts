@@ -12,6 +12,7 @@ export type ProjectSummary = Pick<ProjectDocument, 'id' | 'name' | 'revision' | 
 export type ProjectVersion = Pick<ProjectDocument, 'revision' | 'name' | 'updatedAt' | 'composition'> & {assetCount: number};
 export type ProjectHistory = {projectId: string; currentRevision: number; versions: ProjectVersion[]};
 export type ProjectRestoreResult = {project: ProjectDocument; appliedRevision: number; replayed: boolean; compile: ProjectRuntimeStatus['compile']};
+export type ProjectHistoryPreview = {projectId: string; revision: number; previewUrl: string; composition: ProjectComposition};
 export type ProjectRuntimeStatus = {
   revision: number;
   compile: {state: 'idle' | 'compiling' | 'ready' | 'failed'; requestId?: string; message?: string; previewUrl?: string; revision?: number};
@@ -72,6 +73,7 @@ export const studioApi = {
   save: (project: ProjectDocument, expectedRevision: number, requestId: string) => request<ProjectDocument>(`/projects/${encodeURIComponent(project.id)}`, {method: 'PUT', ...json({project, expectedRevision, requestId})}),
   history: (id: string) => request<ProjectHistory>(`/projects/${encodeURIComponent(id)}/history`),
   version: (id: string, revision: number) => request<ProjectDocument>(`/projects/${encodeURIComponent(id)}/history/${revision}`),
+  historyPreview: (id: string, revision: number) => request<ProjectHistoryPreview>(`/projects/${encodeURIComponent(id)}/history/${revision}/preview`, {method: 'POST', ...json({})}, 180000),
   receipt: (id: string, requestId: string) => request<{projectId: string; requestId: string; appliedRevision: number; kind: 'update' | 'upload'}>(`/projects/${encodeURIComponent(id)}/requests/${encodeURIComponent(requestId)}`),
   restore: (id: string, targetRevision: number, expectedRevision: number, requestId: string) => request<ProjectRestoreResult>(`/projects/${encodeURIComponent(id)}/restore`, {method: 'POST', ...json({targetRevision, expectedRevision, requestId})}, 180000),
   addAsset: (project: ProjectDocument, file: File) => request<ProjectDocument>(`/projects/${encodeURIComponent(project.id)}/assets`, {

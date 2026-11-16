@@ -18,7 +18,7 @@ const fakeRuntime = (onPrepare) => ({
     this.prepared.push(structuredClone(project));
     await onPrepare?.(project);
     const previewId = randomUUID();
-    return {previewId, previewUrl: `http://127.0.0.1:4180/previews/${previewId}/player.html`, composition: project.composition};
+    return {previewId, previewUrl: `http://127.0.0.1:4180/previews/${previewId}/player.html`, projectId: project.id, revision: project.revision, composition: project.composition};
   },
   async handle() {return false;},
 });
@@ -66,6 +66,63 @@ test('a legacy project exposes its current baseline and records that exact basel
   assert.deepEqual((await migrated.listHistory(project.id)).versions.map((entry) => entry.revision), [8, 7]);
   assert.deepEqual(await createProjectStore({dataDir}).readHistory(project.id, 7), legacy);
   await assert.rejects(migrated.readHistory(project.id, 1), {code: 'HISTORY_NOT_FOUND'});
+});
+
+test('historical preview prepares the exact saved source, text, composition and assets without changing the current project or preview', async (t) => {
+  const {store, runtime, controller, project} = await fixture(t);
+  const withAsset = await store.uploadAsset(project.id, {expectedRevision: 1, name: 'old.png', mimeType: 'image/png', bytes: png});
+  const target = await store.updateProject(project.id, {expectedRevision: 2, project: {...withAsset,
+    composition: {...composition, width: 360},
+    source: {...withAsset.source, files: {...withAsset.source.files, 'src/Root.tsx': `${withAsset.source.files['src/Root.tsx']}\n// old source`}},
+    edits: {...withAsset.edits, layers: {title: {text: '옛 문구'}}}}});
+  const withNewAsset = await store.uploadAsset(project.id, {expectedRevision: 3, name: 'new.png', mimeType: 'image/png', bytes: png});
+  const current = await store.updateProject(project.id, {expectedRevision: 4, project: {...withNewAsset,
+    source: {...withNewAsset.source, files: {...withNewAsset.source.files, 'src/Root.tsx': `${withNewAsset.source.files['src/Root.tsx']}\n// new source`}},
+    edits: {...withNewAsset.edits, layers: {title: {text: '현재 문구'}}}}});
+  await finishSaved(controller, current);
+  const beforeStatus = await controller.status(project.id);
+  const beforeHistory = await store.listHistory(project.id);
+  const result = await controller.previewVersion(project.id, target.revision);
+  assert.equal(result.revision, target.revision);
+  assert.deepEqual(runtime.prepared.at(-1), target);
+  assert.deepEqual(runtime.prepared.at(-1).assets, [target.assets[0]]);
+  assert.deepEqual(await store.readProject(project.id), current);
+  assert.deepEqual(await store.listHistory(project.id), beforeHistory);
+  assert.deepEqual(await controller.status(project.id), beforeStatus);
+});
+
+test('historical preview deduplicates concurrent work and errors preserve the active preview', async (t) => {
+  const entered = deferred(), release = deferred();
+  let block = false, fail = false;
+  const {store, runtime, controller, project} = await fixture(t, async (doc) => {
+    if (doc.revision === 1 && block) {entered.resolve(); await release.promise;}
+    if (doc.revision === 1 && fail) throw new Error('historical render failed');
+  });
+  const current = await store.updateProject(project.id, {expectedRevision: 1, project: {...project, name: 'current'}});
+  await finishSaved(controller, current);
+  const beforeStatus = await controller.status(project.id), beforeHistory = await store.listHistory(project.id);
+  const secondRead = deferred();
+  const readHistory = store.readHistory;
+  let reads = 0;
+  store.readHistory = async (...args) => {
+    const result = await readHistory(...args);
+    if (++reads === 2) secondRead.resolve();
+    return result;
+  };
+  block = true;
+  const first = controller.previewVersion(project.id, 1);
+  await entered.promise;
+  const second = controller.previewVersion(project.id, 1);
+  await secondRead.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  release.resolve();
+  assert.deepEqual(await first, await second);
+  assert.equal(runtime.prepared.filter((p) => p.revision === 1).length, 1);
+  block = false; fail = true;
+  await assert.rejects(controller.previewVersion(project.id, 1), {code: 'HISTORY_PREVIEW_FAILED'});
+  assert.deepEqual(await controller.status(project.id), beforeStatus);
+  assert.deepEqual(await store.readProject(project.id), current);
+  assert.deepEqual(await store.listHistory(project.id), beforeHistory);
 });
 
 test('a failed write never publishes its prepared history file or request receipt', async (t) => {
@@ -200,6 +257,15 @@ test('HTTP history, restore and lost-save receipt recovery expose only public da
   assert.equal(retry.status, 200);
   assert.equal((await retry.json()).revision, 3);
   assert.equal((await call(`/projects/${project.id}`, 'PUT', {...saveBody, project: {...saveBody.project, name: '다른 요청'}})).status, 409);
+  const preview = await call(`/projects/${project.id}/history/1/preview`, 'POST', {});
+  assert.equal(preview.status, 200);
+  const oldPreview = await preview.json();
+  assert.equal(oldPreview.revision, 1);
+  assert.equal(oldPreview.projectId, project.id);
+  assert.equal((await server.studio.store.readProject(project.id)).revision, 3);
+  assert.equal((await call(`/projects/${project.id}/history/0/preview`, 'POST', {})).status, 400);
+  assert.equal((await call(`/projects/${project.id}/history/999/preview`, 'POST', {})).status, 404);
+  assert.equal((await call(`/projects/${project.id}/history/1/preview`)).status, 405);
   const restoreBody = {targetRevision: 1, expectedRevision: 3, requestId: randomUUID()};
   const restored = await (await call(`/projects/${project.id}/restore`, 'POST', restoreBody)).json();
   assert.equal(restored.project.revision, 4);

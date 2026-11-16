@@ -297,6 +297,14 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         json(response, 200, await store.listHistory(historyRoute[1]));
         return;
       }
+      const historyPreviewRoute = /^\/projects\/([^/]+)\/history\/([^/]+)\/preview$/.exec(pathname);
+      if (historyPreviewRoute) {
+        if (request.method !== 'POST') throw error('METHOD_NOT_ALLOWED', '저장 버전 미리보기는 POST를 사용합니다.', 405);
+        if (!/^[1-9]\d*$/.test(historyPreviewRoute[2])) throw error('INVALID_REVISION', '올바른 수정 번호가 필요합니다.');
+        await readJson(request);
+        json(response, 200, await controller.previewVersion(historyPreviewRoute[1], Number(historyPreviewRoute[2])));
+        return;
+      }
       const historyVersionRoute = /^\/projects\/([^/]+)\/history\/([^/]+)$/.exec(pathname);
       if (historyVersionRoute) {
         if (request.method !== 'GET') throw error('METHOD_NOT_ALLOWED', '수정 이력은 GET으로 읽을 수 있습니다.', 405);
