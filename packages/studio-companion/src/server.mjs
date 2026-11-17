@@ -10,6 +10,7 @@ import {createWorkerPreviewRuntime} from './worker-preview-runtime.mjs';
 import {createExportManager} from './export-manager.mjs';
 import {exportProjectBundle, importProjectBundle, MAX_BUNDLE_JSON_BYTES} from './project-bundle.mjs';
 import {workspaceMetadata, validateWorkspaceDirectory} from './storage-workspace.mjs';
+import {createRetainedArtifacts} from './retained-artifacts.mjs';
 
 const DEFAULT_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173', 'https://vyvyd.pages.dev'];
 const JSON_BODY_LIMIT = 8 * 1024 * 1024;
@@ -77,15 +78,29 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
     return parsed.origin;
   }));
   const makeWorkspace = (directory, outputDirectory) => {
-    const store = createProjectStore({dataDir: directory});
+    let runtime, exports;
+    const store = createProjectStore({dataDir: directory, cleanupDeletedProject: async (projectId) => {
+      // Attempt both independently; leave the durable tombstone if either fails.
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => {if (typeof runtime.purgeProject !== 'function') throw new Error('Preview cleanup unavailable'); return runtime.purgeProject(projectId);}),
+        exports.purgeProject(projectId),
+      ]);
+      if (results.some((result) => result.status === 'rejected')) throw new Error('Associated project files could not be removed');
+    }});
     const metadata = workspaceMetadata(store.dataDir, {exportsDirectory: outputDirectory, persistent: storageSettings?.persistent === true});
-    const runtime = previewRuntime ?? createWorkerPreviewRuntime({storeDataDir: store.dataDir,
+    runtime = previewRuntime ?? createWorkerPreviewRuntime({storeDataDir: store.dataDir,
       previewDataDir: metadata.previewsDirectory, parentOrigins: [...origins]});
     const origin = () => `http://127.0.0.1:${server.address()?.port ?? 4180}`;
     const controller = createStudioController({store, runtime, origin});
-    const exports = createExportManager({store, runtime, dataDir: metadata.exportsDirectory,
+    exports = createExportManager({store, runtime, dataDir: metadata.exportsDirectory,
       origin, ...(exportRenderer ? {runRender: exportRenderer} : {})});
-    return {store, runtime, controller, exports, metadata};
+    const retained = createRetainedArtifacts({projectsDirectory: metadata.projectsDirectory,
+      previewsDirectory: metadata.previewsDirectory, exportsDirectory: metadata.exportsDirectory, runtime, exports});
+    const result = {store, runtime, controller, exports, retained, metadata, recovering: true};
+    result.recovery = Promise.resolve().then(() => store.recoverPendingDeletions()).finally(() => {result.recovering = false;});
+    // The request path awaits this; avoid an unhandled rejection before the first request.
+    void result.recovery.catch(() => undefined);
+    return result;
   };
   let workspace = makeWorkspace(dataDir, exportDataDir);
   let activeMutations = 0;
@@ -162,7 +177,7 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         if (request.method !== 'PUT') throw error('METHOD_NOT_ALLOWED', '작업 폴더 설정은 GET 또는 PUT을 사용합니다.', 405);
         const input = await readJson(request);
         if (input.expectedStorageId !== workspace.metadata.storageId) throw error('STORAGE_CHANGED', '작업 폴더가 변경되었습니다. 현재 폴더를 다시 확인해 주세요.', 409);
-        if (switching || activeMutations > 0 || workspace.controller.busy() || workspace.exports.busy()) {
+        if (switching || workspace.recovering || activeMutations > 0 || workspace.controller.busy() || workspace.exports.busy()) {
           throw error('STORAGE_BUSY', '저장·미리보기·출력 작업을 마친 뒤 작업 폴더를 변경해 주세요.', 409);
         }
         switching = true;
@@ -184,8 +199,11 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
             }
           };
           if (metadata.workspaceKey === workspace.metadata.workspaceKey) {await persist(); json(response, 200, workspace.metadata); return;}
-          await createProjectStore({dataDir: candidateDirectory}).listProjects();
+          // Validate without removing pending tombstones before the candidate's
+          // output and preview cleanup services are available.
+          await createProjectStore({dataDir: candidateDirectory, cleanupDeletedProject: async () => {throw new Error('Deferred cleanup');}}).listProjects();
           candidate = makeWorkspace(candidateDirectory);
+          await candidate.recovery;
           await candidate.exports.settled();
           await persist();
           const previous = workspace;
@@ -201,6 +219,7 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         }
         return;
       }
+      await workspace.recovery;
       if (switching) throw error('STORAGE_SWITCHING', '작업 폴더를 변경하고 있습니다. 잠시 후 다시 연결해 주세요.', 409);
       if (mutation && deleting) throw error('PROJECT_DELETE_BUSY', '프로젝트 삭제가 끝난 뒤 다시 시도해 주세요.', 409);
       const providedScope = request.headers['x-studio-storage-id'];
@@ -214,7 +233,7 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         throw error('STORAGE_CHANGED', '작업 폴더가 변경되었습니다. 서비스를 다시 연결하고 최신 프로젝트를 읽어 주세요.', 409);
       }
       // Every request holds one immutable workspace context across all awaits.
-      const {store, runtime, controller, exports} = workspace;
+      const {store, runtime, controller, exports, retained} = workspace;
       // Scoped reads may finish against their captured folder while switching.
       // Only writes and background jobs need to hold the switch gate.
       if (mutation) {activeMutations++; leased = true;}
@@ -235,6 +254,32 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
           json(response, 200, await controller.tool(parsed.definition.name, parsed.args, clientName));
         }
         return;
+      }
+      if (pathname === '/retained-artifacts') {
+        if (request.method !== 'GET') throw error('METHOD_NOT_ALLOWED', '보관 파일 목록은 GET을 사용합니다.', 405);
+        json(response, 200, await retained.list()); return;
+      }
+      const retainedRoute = /^\/retained-artifacts\/(export|preview)\/([^/]+)(\/file)?$/.exec(pathname);
+      if (retainedRoute) {
+        const [, kind, id, file] = retainedRoute;
+        if (file && kind === 'export' && ['GET', 'HEAD'].includes(request.method)) {
+          const projectIds = requestUrl.searchParams.getAll('projectId');
+          if (projectIds.length !== 1) throw error('INVALID_ID', '프로젝트 ID가 필요합니다.');
+          const item = await retained.requireItem(kind, id, projectIds[0]);
+          const result = await exports.readResult(item.projectId, item.id);
+          response.writeHead(200, {'Content-Type': result.mimeType, 'Content-Length': result.size,
+            'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(result.filename)}`});
+          if (request.method === 'HEAD') response.end(); else await pipeline(createReadStream(result.path), response);
+          return;
+        }
+        if (!file && request.method === 'DELETE') {
+          const input = await readJson(request);
+          if (deleting || activeMutations !== 1 || controller.busy() || exports.busy()) throw error('PROJECT_BUSY', '저장, 미리보기 또는 출력 작업을 마친 뒤 삭제해 주세요.', 409);
+          deleting = true;
+          try {json(response, 200, await retained.remove(kind, id, input.projectId));} finally {deleting = false;}
+          return;
+        }
+        throw error('METHOD_NOT_ALLOWED', '지원하지 않는 보관 파일 요청입니다.', 405);
       }
       if (pathname === '/projects') {
         if (request.method === 'GET') json(response, 200, await store.listProjects());
@@ -286,12 +331,20 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         } else throw error('METHOD_NOT_ALLOWED', '지원하지 않는 출력 요청 방식입니다.', 405);
         return;
       }
-      const projectRoute = /^\/projects\/([^/]+)$/.exec(pathname);
+      const projectRoute = /^\/projects\/([^/]+)(\/delete)?$/.exec(pathname);
       if (projectRoute) {
-        if (request.method === 'GET') json(response, 200, await store.readProject(projectRoute[1]));
-        else if (request.method === 'PUT') json(response, 200, await controller.save(projectRoute[1], await readJson(request)));
-        else if (request.method === 'DELETE') {
+        const policyRoute = Boolean(projectRoute[2]);
+        if (!policyRoute && request.method === 'GET') json(response, 200, await store.readProject(projectRoute[1]));
+        else if (!policyRoute && request.method === 'PUT') json(response, 200, await controller.save(projectRoute[1], await readJson(request)));
+        else if (policyRoute && request.method === 'POST' || !policyRoute && request.method === 'DELETE') {
           const input = await readJson(request);
+          // New clients use a distinct route with an explicit policy. An older
+          // service returns 404 instead of silently ignoring a preserve choice.
+          if (policyRoute && typeof input.deleteAssociatedFiles !== 'boolean') {
+            throw error('INVALID_DELETE_OPTIONS', '출력 파일과 미리보기 삭제 여부를 확인해 주세요.');
+          }
+          // Legacy clients were told associated files would always be deleted.
+          const deleteAssociatedFiles = policyRoute ? input.deleteAssociatedFiles : true;
           // Establish a service-wide write gate before the first await. A write
           // already admitted, a background compile, or an export must finish
           // before removing a project and its immutable history.
@@ -301,7 +354,7 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
           deleting = true;
           controller.beginProjectDelete(projectRoute[1]);
           try {
-            const result = await store.deleteProject(projectRoute[1], input);
+            const result = await store.deleteProject(projectRoute[1], {expectedRevision: input.expectedRevision, deleteAssociatedFiles});
             controller.forgetProject(result.projectId);
             json(response, 200, result);
           } catch (cause) {

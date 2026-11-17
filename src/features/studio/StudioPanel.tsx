@@ -6,6 +6,7 @@ import StudioSourcePreview from './StudioSourcePreview';
 import StudioLayersPanel from './StudioLayersPanel';
 import StudioHistoryPanel from './StudioHistoryPanel';
 import StudioDeleteDialog from './StudioDeleteDialog';
+import StudioRetainedFilesPanel from './StudioRetainedFilesPanel';
 import {useStudioEditor} from './useStudioEditor';
 import type {Fields} from './studioEditorSettings';
 import {useEffect, useRef, useState} from 'react';
@@ -39,6 +40,7 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
 function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: StudioWorkspaceState}) {
   const bundleInput = useRef<HTMLInputElement>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectSummary | null>(null);
+  const [retainedBusy, setRetainedBusy] = useState(false);
   useEffect(() => {if (!isActive) setDeleteTarget(null);}, [isActive]);
   const {controller: mediaTransfer} = useMediaTransfer();
   const {
@@ -52,7 +54,7 @@ function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: Stud
     adoptRemote, undo, redo, canUndo, canRedo, beginInteraction, endInteraction, registerCancel, keyboardShortcut,
     refreshHistory, selectVersion, restoreVersion, restoreRecovery, hasDraft, hasDeletionDraft, importProject,
   } = useStudioEditor(isActive, workspace.storage?.workspaceKey, workspace.beforeConnect, workspace.storage?.baseDirectory);
-  useEffect(() => {workspace.onBlockedChange(dirty || busy || Boolean(pendingWrite) || creating, dirty || Boolean(pendingWrite) || creating);}, [workspace.onBlockedChange, dirty, busy, pendingWrite, creating]);
+  useEffect(() => {workspace.onBlockedChange(dirty || busy || retainedBusy || Boolean(pendingWrite) || creating, dirty || Boolean(pendingWrite) || creating);}, [workspace.onBlockedChange, dirty, busy, retainedBusy, pendingWrite, creating]);
   const previewDocument = project;
   const fieldTarget = (target: EventTarget) => target instanceof HTMLElement && Boolean(target.closest('input,textarea,select'));
   const lastMcpSeen = runtimeStatus?.mcp.lastSeenAt ? Date.parse(runtimeStatus.mcp.lastSeenAt) : NaN;
@@ -61,7 +63,7 @@ function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: Stud
   const compileLabels = {idle: '소스 컴파일 대기', compiling: '소스 컴파일 중…', ready: '소스 미리보기 준비됨', failed: '소스 컴파일 실패'};
 
   return <section onKeyDownCapture={deleteTarget ? undefined : keyboardShortcut} aria-label="포스터 메이커" className="relative space-y-5">
-    {deleteTarget && <StudioDeleteDialog project={deleteTarget} hasDraft={hasDeletionDraft(deleteTarget.id)} onCancel={() => setDeleteTarget(null)} onConfirm={() => {const target = deleteTarget; setDeleteTarget(null); void deleteProject(target);}} />}
+    {deleteTarget && <StudioDeleteDialog project={deleteTarget} hasDraft={hasDeletionDraft(deleteTarget.id)} onCancel={() => setDeleteTarget(null)} onConfirm={(deleteAssociatedFiles) => {const target = deleteTarget; setDeleteTarget(null); void deleteProject(target, deleteAssociatedFiles);}} />}
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><p className="flex items-center gap-2 text-xs text-purple-300"><Palette size={15} /> 포스터 · 홍보지</p><h2 className="mt-2 text-2xl font-semibold text-white">포스터 메이커</h2><p className="mt-2 text-sm text-gray-400">빈 캔버스에서 시작하고, 이미지와 프로젝트를 이 컴퓨터에 보관하세요.</p></div>
       <button className={buttonClass} disabled={busy} onClick={() => void connect(!project)}><RefreshCw size={14} className={busy ? 'animate-spin' : ''} />{connected ? '연결 확인' : '다시 연결'}</button>
@@ -72,6 +74,7 @@ function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: Stud
     {!connected && <p className="text-xs leading-relaxed text-gray-400">현재 입력은 이 탭에 보관됩니다. 로컬 편집은 계속할 수 있고, 저장·파일 추가·버전 복원은 다시 연결한 뒤 사용할 수 있습니다.</p>}
     {error && <p role="alert" className="whitespace-pre-line rounded-xl border border-amber-400/20 bg-amber-400/5 p-3 text-sm text-amber-200">{error}</p>}
     {draftNotice && <p role="status" className="rounded-lg border border-amber-400/20 p-3 text-xs text-amber-200">{draftNotice}</p>}
+    <StudioRetainedFilesPanel connected={connected} isActive={isActive} onBusyChange={setRetainedBusy} />
     <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
       <aside className="space-y-4 rounded-xl border border-white/10 bg-black/15 p-4" aria-label="저장된 프로젝트">
         <div className="flex items-center gap-2 text-sm font-semibold text-white"><FolderOpen size={16} />내 프로젝트</div>

@@ -31,6 +31,20 @@ test('project writes carry folder identity while folder discovery and switch sta
   assert.equal(api.getStudioWorkspaceKey(), 'stable-first');
 });
 
+test('optional deletion uses a new scoped endpoint and explicitly transmits both cleanup choices', async () => {
+  const calls = [];
+  const api = client(async (url, init) => {calls.push({url, init}); return response({projectId: 'project', deleted: true}, 'first');});
+  api.setStudioStorageScope({storageId: 'first', workspaceKey: 'stable-first'});
+  await api.studioApi.deleteProject('project', 4, false);
+  await api.studioApi.deleteProject('project', 4, true);
+  assert.equal(new URL(calls[0].url).pathname, '/projects/project/delete');
+  for (const [index, value] of [false, true].entries()) {
+    assert.equal(calls[index].init.method, 'POST');
+    assert.equal(calls[index].init.headers.get('X-Studio-Storage-Id'), 'first');
+    assert.deepEqual(JSON.parse(calls[index].init.body), {expectedRevision: 4, deleteAssociatedFiles: value});
+  }
+});
+
 test('a project response that finishes after changing folders is rejected', async () => {
   let finish;
   const api = client(() => new Promise(resolve => {finish = resolve;}));

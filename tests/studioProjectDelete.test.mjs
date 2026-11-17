@@ -14,7 +14,7 @@ const deferred = () => {let resolve; const promise = new Promise((done) => {reso
 test('delete removes one project and its source, image and history only with the current revision', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'vyvyd-delete-'));
   t.after(() => rm(root, {recursive: true, force: true}));
-  const store = createProjectStore({dataDir: root});
+  const store = createProjectStore({dataDir: root, cleanupDeletedProject: async () => {}});
   const project = await store.createProject({name: '삭제 대상', composition});
   const other = await store.createProject({name: '다른 프로젝트', composition});
   const uploaded = await store.uploadAsset(project.id, {expectedRevision: 1, name: 'image.png', mimeType: 'image/png', bytes: png});
@@ -33,7 +33,7 @@ test('delete removes one project and its source, image and history only with the
 test('serialized delete never removes a concurrent newer save or resurrects a deleted project', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'vyvyd-delete-race-'));
   t.after(() => rm(root, {recursive: true, force: true}));
-  const store = createProjectStore({dataDir: root});
+  const store = createProjectStore({dataDir: root, cleanupDeletedProject: async () => {}});
   const first = await store.createProject({name: 'first', composition});
   const save = store.updateProject(first.id, {expectedRevision: 1, project: {...first, name: 'newer'}});
   const staleDelete = store.deleteProject(first.id, {expectedRevision: 1});
@@ -51,14 +51,14 @@ test('serialized delete never removes a concurrent newer save or resurrects a de
 test('partial cleanup leaves no damaged visible project and is retried on store restart', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'vyvyd-delete-cleanup-'));
   t.after(() => rm(root, {recursive: true, force: true}));
-  const store = createProjectStore({dataDir:root, removeDeletedDirectory: async () => {throw new Error('locked');}});
+  const store = createProjectStore({dataDir:root, cleanupDeletedProject: async () => {}, removeDeletedDirectory: async () => {throw new Error('locked');}});
   const project = await store.createProject({name:'locked files', composition});
   assert.deepEqual(await store.deleteProject(project.id, {expectedRevision:1}), {projectId:project.id,deleted:true,cleanupPending:true});
   assert.deepEqual(await store.listProjects(), []);
   const tombstone = (await readdir(root)).find((name) => name.startsWith(`.deleted-${project.id}-`));
   assert.ok(tombstone);
   assert.equal(JSON.parse(await readFile(path.join(root, tombstone, 'project.json'), 'utf8')).id, project.id);
-  const restarted = createProjectStore({dataDir:root});
+  const restarted = createProjectStore({dataDir:root, cleanupDeletedProject: async () => {}});
   assert.deepEqual(await restarted.listProjects(), []);
   assert.ok(!(await readdir(root)).includes(tombstone));
 });
@@ -67,7 +67,7 @@ test('delete refuses a project directory junction and never deletes through a ne
   const root = await mkdtemp(path.join(os.tmpdir(), 'vyvyd-delete-path-'));
   const outside = await mkdtemp(path.join(os.tmpdir(), 'vyvyd-delete-outside-'));
   t.after(async () => {await rm(root, {recursive: true, force: true}); await rm(outside, {recursive: true, force: true});});
-  const store = createProjectStore({dataDir: root});
+  const store = createProjectStore({dataDir: root, cleanupDeletedProject: async () => {}});
   const project = await store.createProject({name: 'safe', composition});
   const sentinel = path.join(outside, 'keep.txt');
   await writeFile(sentinel, 'keep');
@@ -86,7 +86,7 @@ test('HTTP delete enforces CORS, origin, storage scope, revision and active prev
   const root = await mkdtemp(path.join(os.tmpdir(), 'vyvyd-delete-http-'));
   const entered = deferred(), release = deferred();
   const runtime = {async prepare(project) {entered.resolve(); await release.promise; const previewId = randomUUID();
-    return {previewId, projectId: project.id, revision: project.revision, previewUrl: `http://127.0.0.1:4180/previews/${previewId}/player.html`};}, async handle() {return false;}};
+    return {previewId, projectId: project.id, revision: project.revision, previewUrl: `http://127.0.0.1:4180/previews/${previewId}/player.html`};}, async handle() {return false;}, async purgeProject() {}};
   const server = createStudioServer({dataDir: path.join(root, 'projects'), exportDataDir: path.join(root, 'exports'), previewRuntime: runtime});
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {release.resolve(); await server.studio.controller.settled(); await server.studio.exports.shutdown();
@@ -123,7 +123,7 @@ test('HTTP deletion waits for read-only status snapshot recovery and clears its 
   const entered = deferred(), release = deferred();
   const runtime = {async findSnapshot(project) {entered.resolve(); await release.promise;
     return {revision:project.revision, previewUrl:'http://127.0.0.1:4180/previews/recovered/player.html'};},
-  async handle() {return false;}};
+  async handle() {return false;}, async purgeProject() {}};
   const server = createStudioServer({dataDir:path.join(root,'projects'), exportDataDir:path.join(root,'exports'), previewRuntime:runtime});
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {release.resolve(); await server.studio.exports.shutdown();
@@ -145,7 +145,7 @@ test('HTTP deletion waits for read-only status snapshot recovery and clears its 
 test('a deletion holds the write gate until complete, including writes to other projects', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'vyvyd-delete-gate-'));
   const entered = deferred(), release = deferred();
-  const runtime = {async handle() {return false;}};
+  const runtime = {async handle() {return false;}, async purgeProject() {}};
   const server = createStudioServer({dataDir:path.join(root,'projects'), exportDataDir:path.join(root,'exports'), previewRuntime:runtime});
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {release.resolve(); await server.studio.exports.shutdown();

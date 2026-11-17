@@ -353,5 +353,46 @@ export function createPreviewRuntime({dataDir = path.join(repoRoot, '.local', 's
     return {serveUrl: `${parsed.origin}/previews/${record.previewId}/render/`,
       composition: structuredClone(record.composition), inputProps: structuredClone(record.inputProps)};
   };
-  return {prepare, handle, renderPreview, findSnapshot, getExportSnapshot};
+  const purgeProject = (projectId) => serial(async () => {
+    if (typeof projectId !== 'string' || !UUID.test(projectId)) throw new Error('Invalid project ID');
+    projectId = projectId.toLowerCase();
+    await ensureRoot();
+    let failed = false;
+    const processed = new Set();
+    for (const entry of await readdir(root, {withFileTypes: true})) {
+      if (!UUID.test(entry.name) || !entry.isDirectory()) continue;
+      const directory = path.join(root, entry.name);
+      const records = [];
+      let badMetadata = false;
+      for (const name of ['preview.json', 'snapshot.json']) {
+        const info = await lstat(path.join(directory, name)).catch((cause) => {if (cause.code === 'ENOENT') return null; throw cause;});
+        if (!info) continue;
+        const file = await readonlyFile(directory, name);
+        if (!file) {badMetadata = true; continue;}
+        try {records.push(JSON.parse(await readFile(file, 'utf8')));} catch {badMetadata = true;}
+      }
+      const cached = versions.get(entry.name);
+      if (!records.some((record) => record?.projectId?.toLowerCase?.() === projectId)
+        && cached?.projectId?.toLowerCase?.() !== projectId) continue;
+      processed.add(entry.name);
+      if (badMetadata || !records.length || records.some((record) => record?.previewId !== entry.name || record?.projectId?.toLowerCase?.() !== projectId)) {failed = true; continue;}
+      try {
+        const info = await lstat(directory);
+        if (path.dirname(directory) !== root || path.relative(root, directory) !== entry.name || !info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe preview path');
+        versions.delete(entry.name);
+        await rm(directory, {recursive: true});
+      } catch {failed = true;}
+    }
+    for (const [id, record] of versions) {
+      if (record.projectId?.toLowerCase?.() !== projectId || processed.has(id)) continue;
+      const info = await lstat(path.join(root, id)).catch((cause) => {if (cause.code === 'ENOENT') return null; throw cause;});
+      if (!info) versions.delete(id); else failed = true;
+    }
+    if (failed) throw new Error('일부 미리보기 캐시를 정리하지 못했습니다.');
+  });
+  const forgetRetained = (id, projectId) => serial(async () => {
+    const cached = versions.get(id);
+    if (cached?.projectId?.toLowerCase?.() === projectId.toLowerCase()) versions.delete(id);
+  });
+  return {prepare, handle, renderPreview, findSnapshot, getExportSnapshot, purgeProject, forgetRetained};
 }

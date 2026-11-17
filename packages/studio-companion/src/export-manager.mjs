@@ -304,6 +304,8 @@ export function createExportManager({store, runtime,
     retry(projectId, jobId, args) {return serial(async () => {
       await ready;
       const original = getRecord(projectId, jobId);
+      // An output snapshot must not resurrect a deleted project after a failed cleanup.
+      await store.readProject(original.projectId);
       const requestId = idFor(args?.requestId, '요청');
       const intent = fingerprint({kind: 'retry', projectId: original.projectId, jobId: original.id});
       const previous = replay(original.projectId, requestId, intent);
@@ -319,6 +321,41 @@ export function createExportManager({store, runtime,
       const {target, info} = await safeFile(record.id, `result.${record.options.format}`);
       if (info.size !== record.result.size || await digestFile(target) !== record.resultHash) throw error('EXPORT_RESULT_CHANGED', '출력 파일이 변경되었습니다. 파일을 다시 출력해 주세요.', 422);
       return {path: target, size: info.size, mimeType: record.result.mimeType, filename: record.result.filename};
+    });},
+    purgeProject(projectId) {return serial(async () => {
+      await ready;
+      projectId = idFor(projectId, '프로젝트');
+      await safeDirectory(root);
+      let failed = false;
+      const attempted = new Set();
+      for (const record of records.values()) {
+        if (record.projectId !== projectId) continue;
+        attempted.add(record.id);
+        try {
+          if (active.has(record.state)) throw new Error('Active export');
+          const directory = await safeDirectory(directoryFor(record.id));
+          if (path.dirname(directory) !== root || path.relative(root, directory) !== record.id || !UUID.test(path.basename(directory))) throw new Error('Unsafe export path');
+          const file = await safeFile(record.id, 'job.json');
+          const current = JSON.parse(await readFile(file.target, 'utf8'));
+          if (current.id !== record.id || current.projectId !== projectId || current.projectHash !== record.projectHash) throw new Error('Export ownership changed');
+          await rm(directory, {recursive: true});
+          records.delete(record.id);
+        } catch {failed = true;}
+      }
+      // Do not trust a directory name alone: remove only validated records
+      // that explicitly name this project. Unreadable matching records remain.
+      for (const entry of await readdir(root, {withFileTypes: true})) {
+        if (!UUID.test(entry.name) || !entry.isDirectory() || attempted.has(entry.name)) continue;
+        let raw;
+        try {const file = await safeFile(entry.name, 'job.json'); raw = JSON.parse(await readFile(file.target, 'utf8'));} catch {continue;}
+        if (typeof raw.projectId !== 'string' || raw.projectId.toLowerCase() !== projectId) continue;
+        failed = true;
+      }
+      if (failed) throw error('EXPORT_CLEANUP_PENDING', '일부 출력 파일을 정리하지 못했습니다.', 500);
+    });},
+    forgetRetained(id, projectId) {return serial(async () => {
+      await ready; id = idFor(id, '출력'); projectId = idFor(projectId, '프로젝트');
+      if (records.get(id)?.projectId === projectId) records.delete(id);
     });},
     busy() {return !initialized || Boolean(pumpPromise || running) || [...records.values()].some((record) => active.has(record.state));},
     async settled() {await ready; await mutation; while (pumpPromise) {await pumpPromise; await mutation;}},

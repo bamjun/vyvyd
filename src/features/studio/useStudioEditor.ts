@@ -342,7 +342,7 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
     } catch (cause) {if (token === operation.current) markFailure(cause);}
     finally {if (token === operation.current) setBusy(false);}
   };
-  const deleteProject = async (entry: ProjectSummary) => {
+  const deleteProject = async (entry: ProjectSummary, deleteAssociatedFiles: boolean) => {
     if (!connectedRef.current || busyRef.current) return;
     const unresolved = uncertainDelete.current ?? storedDeletion(deleteKey);
     if (unresolved && unresolved.id !== entry.id) {
@@ -362,11 +362,11 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
     try {sessionStorage.setItem(deleteKey, JSON.stringify(uncertainDelete.current));} catch { /* Keep the confirmation in memory. */ }
     try {
       const revision = current ? projectRef.current!.revision : entry.revision;
-      const result = await studioApi.deleteProject(entry.id, revision);
+      const result = await studioApi.deleteProject(entry.id, revision, deleteAssociatedFiles);
       if (!mounted.current || token !== operation.current) return;
       if (!result.deleted || result.projectId !== entry.id) throw new Error('삭제 결과를 확인하지 못했습니다. 목록을 다시 확인하세요.');
       finishDeletion(entry);
-      if (result.cleanupPending) {setStatus(`“${entry.name}” 프로젝트를 목록에서 삭제했습니다.`); setError('프로젝트는 목록에서 삭제되었지만 일부 파일을 정리하지 못했습니다. 작업 폴더를 확인해 주세요.');}
+      if (result.cleanupPending) {setStatus(`“${entry.name}” 프로젝트를 목록에서 삭제했습니다.`); setError(deleteAssociatedFiles ? '프로젝트는 목록에서 삭제되었지만 프로젝트 파일, 출력 파일 또는 미리보기 캐시 일부를 정리하지 못했습니다. 작업 폴더를 확인해 주세요.' : '프로젝트는 목록에서 삭제되었지만 프로젝트 파일 일부를 정리하지 못했습니다. 작업 폴더를 확인해 주세요.');}
       try {const list = await studioApi.list(); if (mounted.current && token === operation.current) setProjects(list);} catch { /* The local list already reflects the confirmed deletion. */ }
     } catch (cause) {
       if (token !== operation.current) return;
@@ -377,6 +377,9 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
         try {const list = await studioApi.list(); if (mounted.current && token === operation.current) setProjects(list);} catch { /* Preserve the original conflict. */ }
       }
       markFailure(cause);
+      if (cause instanceof StudioApiError && cause.status === 404 && cause.code === 'NOT_FOUND') {
+        setError('현재 로컬 Studio 서비스는 선택한 삭제 옵션을 지원하지 않습니다. 서비스를 업데이트하고 다시 시작한 뒤 다시 시도해 주세요.');
+      }
       if (cause instanceof StudioApiError && cause.status === 0) {
         setError('삭제 결과를 확인하지 못했습니다. 현재 초안은 보관했습니다. 다시 연결한 뒤 프로젝트 목록을 확인하세요.');
       } else if (!unresolved && cause instanceof StudioApiError && cause.status >= 400 && cause.status < 500) {

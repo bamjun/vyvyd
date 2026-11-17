@@ -47,5 +47,7 @@ export function createWorkerPreviewRuntime({storeDataDir, previewDataDir, parent
     renderPreview: async (...args) => (await getRuntime()).renderPreview(...args),
     findSnapshot: async (project, options = {}) => (await getRuntime()).findSnapshot(project, {...options, parentOrigins}),
     getExportSnapshot: async (...args) => (await getRuntime()).getExportSnapshot(...args),
+    purgeProject: async (...args) => (await getRuntime()).purgeProject(...args),
+    forgetRetained: async (...args) => (await getRuntime()).forgetRetained(...args),
   };
 }

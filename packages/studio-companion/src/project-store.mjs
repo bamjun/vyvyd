@@ -121,7 +121,7 @@ const assertAssetName = (name) => {
   return name;
 };
 
-export function createProjectStore({dataDir = DEFAULT_DATA_DIR, removeDeletedDirectory = (directory) => rm(directory, {recursive: true})} = {}) {
+export function createProjectStore({dataDir = DEFAULT_DATA_DIR, removeDeletedDirectory = (directory) => rm(directory, {recursive: true}), cleanupDeletedProject = async () => {throw new Error('Associated cleanup unavailable');}} = {}) {
   const root = path.resolve(dataDir);
   const queues = new Map();
   let cleanupOnStartup;
@@ -134,12 +134,21 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR, removeDeletedDir
     // Retry once per store startup, and only for safe, UUID-named children.
     cleanupOnStartup ??= (async () => {
       for (const item of await readdir(root, {withFileTypes: true})) {
-        if (!/^\.deleted-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item.name)) continue;
+        // Legacy markers mean associated files were requested for deletion.
+        // The keep marker is part of the atomic rename, so a crash cannot
+        // turn a preserve request into a later destructive cleanup.
+        const match = /^\.deleted-(?:(keep)-)?([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.exec(item.name);
+        if (!match) continue;
         const candidate = path.join(root, item.name);
         const info = await lstat(candidate).catch(() => null);
         if (path.dirname(candidate) !== root || path.relative(root, candidate) !== item.name
           || !info?.isDirectory() || info.isSymbolicLink()) continue;
-        await removeDeletedDirectory(candidate).catch(() => undefined);
+        // Never purge caches when a project with the same ID is present again.
+        const live = await lstat(path.join(root, match[2].toLowerCase())).catch((cause) => {if (cause.code === 'ENOENT') return null; throw cause;});
+        if (live) continue;
+        // Keep the tombstone until associated output/preview cleanup succeeds,
+        // so a crash or locked file cannot lose the durable deletion intent.
+        try {if (!match[1]) await cleanupDeletedProject(match[2].toLowerCase()); await removeDeletedDirectory(candidate);} catch { /* retry on next startup */ }
       }
     })();
     await cleanupOnStartup;
@@ -267,6 +276,7 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR, removeDeletedDir
 
   return {
     dataDir: root,
+    recoverPendingDeletions: ensureRoot,
     async listProjects() {
       await ensureRoot();
       const directories = await readdir(root, {withFileTypes: true});
@@ -283,8 +293,9 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR, removeDeletedDir
       return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
     },
     readProject,
-    async deleteProject(id, {expectedRevision} = {}) {
+    async deleteProject(id, {expectedRevision, deleteAssociatedFiles = true} = {}) {
       id = assertId(id);
+      if (typeof deleteAssociatedFiles !== 'boolean') fail('INVALID_DELETE_OPTIONS', '출력 파일과 미리보기 삭제 여부를 확인해 주세요.');
       return serialized(id, async () => {
         const {document} = await readRecord(id);
         assertCurrentRevision(document, expectedRevision);
@@ -299,7 +310,7 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR, removeDeletedDir
         }
         // Rename first: once committed, partial filesystem cleanup cannot
         // leave a damaged project visible as if the deletion had failed.
-        const tombstoneName = `.deleted-${id}-${randomUUID()}`;
+        const tombstoneName = `.deleted-${deleteAssociatedFiles ? '' : 'keep-'}${id}-${randomUUID()}`;
         const tombstone = path.join(root, tombstoneName);
         if (path.dirname(tombstone) !== root || path.relative(root, tombstone) !== tombstoneName) {
           fail('UNSAFE_STORAGE_PATH', '프로젝트 저장 경로가 올바르지 않습니다.', 500);
@@ -308,6 +319,7 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR, removeDeletedDir
         try {
           const renamed = await lstat(tombstone);
           if (!renamed.isDirectory() || renamed.isSymbolicLink()) throw new Error('Unsafe deleted project directory');
+          if (deleteAssociatedFiles) await cleanupDeletedProject(id);
           await removeDeletedDirectory(tombstone);
           return {projectId: id, deleted: true};
         } catch {

@@ -41,7 +41,7 @@ function mount(initial) {
     open:async (id) => {if (!docs.has(id)) throw new ApiError('missing','PROJECT_NOT_FOUND',404); return docs.get(id);},
     status:async (id) => ({revision:docs.get(id).revision,compile:{state:'ready'},mcp:{}}),
     history:async (id) => ({projectId:id,currentRevision:docs.get(id).revision,versions:[]}),
-    deleteProject:async (id, revision) => {if (deletion) return deletion(id, revision, docs); docs.delete(id); return {projectId:id,deleted:true};},
+    deleteProject:async (id, revision, deleteAssociatedFiles) => {if (deletion) return deletion(id, revision, docs, deleteAssociatedFiles); docs.delete(id); return {projectId:id,deleted:true};},
   };
   const fakeWindow = {setTimeout:(fn) => {const id = ++timerId; timers.set(id,fn); return id;}, clearTimeout:(id) => timers.delete(id),
     setInterval:() => 1, clearInterval:() => {}, addEventListener:() => {}, removeEventListener:() => {}};
@@ -78,10 +78,14 @@ test('deleting another project preserves the current draft; deleting the current
     await host.settle(); await host.value.openProject(first.id); host.render();
     host.value.setFields({...host.value.fields,name:'유지할 초안'}); host.render();
     assert.equal(host.value.hasDeletionDraft(first.id),true); assert.equal(host.value.hasDeletionDraft(second.id),false);
-    await host.value.deleteProject(summary(second)); host.render();
+    let choice;
+    host.setDelete(async (id, _revision, docs, deleteAssociatedFiles) => {choice = deleteAssociatedFiles; docs.delete(id); return {projectId:id,deleted:true};});
+    await host.value.deleteProject(summary(second), false); host.render();
+    assert.equal(choice, false);
     assert.equal(host.value.project.id,first.id); assert.equal(host.value.fields.name,'유지할 초안'); assert.equal(host.value.dirty,true);
     assert.deepEqual(host.value.projects.map((item) => item.id),[first.id]);
-    await host.value.deleteProject(summary(first)); host.render();
+    await host.value.deleteProject(summary(first), true); host.render();
+    assert.equal(choice, true);
     assert.equal(host.value.project,null); assert.equal(host.value.projects.length,0);
     assert.equal(host.localStorage.getItem(workspaceKeys.studioWorkspaceKeys('test-workspace').selectedKey),null);
   } finally {host.close();}
@@ -92,10 +96,10 @@ test('conflict preserves the draft, and a lost response is reconciled only after
     await host.settle(); await host.value.openProject(first.id); host.render();
     host.value.setFields({...host.value.fields,name:'보존할 초안'}); host.render();
     host.setDelete(async () => {throw new ApiError('changed','REVISION_CONFLICT',409);});
-    await host.value.deleteProject(summary(first)); host.render();
+    await host.value.deleteProject(summary(first), true); host.render();
     assert.equal(host.value.project.id,first.id); assert.equal(host.value.fields.name,'보존할 초안'); assert.equal(host.value.dirty,true);
     host.setDelete(async (id, _revision, docs) => {docs.delete(id); throw new ApiError('lost','CONNECTION_FAILED',0);});
-    await host.value.deleteProject(summary(first)); host.render();
+    await host.value.deleteProject(summary(first), true); host.render();
     assert.equal(host.value.project.id,first.id); assert.equal(host.value.fields.name,'보존할 초안');
     await host.value.connect(); host.render();
     assert.equal(host.value.project,null); assert.deepEqual(host.value.projects.map((item) => item.id),[second.id]);
@@ -108,12 +112,12 @@ test('an unrelated not-found error preserves the draft and a pending response is
     await host.settle(); await host.value.openProject(first.id); host.render();
     host.value.setFields({...host.value.fields,name:'그대로 둘 초안'}); host.render();
     host.setDelete(async () => {throw new ApiError('missing','PROJECT_NOT_FOUND',404);});
-    await host.value.deleteProject(summary(first)); host.render();
+    await host.value.deleteProject(summary(first), false); host.render();
     assert.equal(host.value.project.id,first.id); assert.equal(host.value.fields.name,'그대로 둘 초안');
     host.setDelete(async () => {throw new ApiError('lost','CONNECTION_FAILED',0);});
-    await host.value.deleteProject(summary(first)); host.render(); await host.value.connect(); host.render();
+    await host.value.deleteProject(summary(first), false); host.render(); await host.value.connect(); host.render();
     assert.equal(host.value.project.id,first.id); assert.equal(host.value.fields.name,'그대로 둘 초안'); assert.equal(host.value.dirty,true);
-    await host.value.deleteProject(summary(second)); host.render();
+    await host.value.deleteProject(summary(second), false); host.render();
     assert.match(host.value.error,/삭제 결과를 먼저 확인/); assert.ok(host.docs.has(second.id));
   } finally {host.close();}
 });
@@ -122,8 +126,28 @@ test('partial disk cleanup is reported even after the project leaves the list', 
   const host=mount([first]); try {
     await host.settle(); await host.value.openProject(first.id); host.render();
     host.setDelete(async (id, _revision, docs) => {docs.delete(id); return {projectId:id,deleted:true,cleanupPending:true};});
-    await host.value.deleteProject(summary(first)); host.render();
-    assert.equal(host.value.project,null); assert.match(host.value.error,/일부 파일을 정리하지 못했습니다/);
+    await host.value.deleteProject(summary(first), true); host.render();
+    assert.equal(host.value.project,null); assert.match(host.value.error,/출력 파일 또는 미리보기 캐시 일부를 정리하지 못했습니다/);
+  } finally {host.close();}
+});
+
+test('a legacy service missing the optional deletion endpoint preserves the draft and requests an update', async () => {
+  const host=mount([first]); try {
+    await host.settle(); await host.value.openProject(first.id); host.render();
+    host.value.setFields({...host.value.fields,name:'유지할 초안'}); host.render();
+    host.setDelete(async () => {throw new ApiError('요청한 작업을 찾을 수 없습니다.','NOT_FOUND',404);});
+    await host.value.deleteProject(summary(first), false); host.render();
+    assert.equal(host.value.project.id,first.id); assert.equal(host.value.fields.name,'유지할 초안');
+    assert.equal(host.value.dirty,true); assert.ok(host.docs.has(first.id)); assert.match(host.value.error,/업데이트하고 다시 시작/);
+  } finally {host.close();}
+});
+
+test('cleanup warning does not claim retained outputs were supposed to be deleted', async () => {
+  const host=mount([first]); try {
+    await host.settle(); await host.value.openProject(first.id); host.render();
+    host.setDelete(async (id, _revision, docs) => {docs.delete(id); return {projectId:id,deleted:true,cleanupPending:true};});
+    await host.value.deleteProject(summary(first), false); host.render();
+    assert.match(host.value.error,/프로젝트 파일 일부/); assert.doesNotMatch(host.value.error,/출력 파일/);
   } finally {host.close();}
 });
 
@@ -132,7 +156,7 @@ test('confirmed deletion is recorded before the response so it can be reconciled
     await host.settle(); await host.value.openProject(first.id); host.render();
     let release; const waiting=new Promise((resolve) => {release=resolve;});
     host.setDelete(async (id, _revision, docs) => {await waiting; docs.delete(id); return {projectId:id,deleted:true};});
-    const pending=host.value.deleteProject(summary(first));
+    const pending=host.value.deleteProject(summary(first), true);
     const key=`${workspaceKeys.studioWorkspaceKeys('test-workspace').selectedKey}.pendingDelete`;
     assert.equal(JSON.parse(host.sessionStorage.getItem(key)).id,first.id);
     release(); await pending; host.render();

@@ -13,6 +13,12 @@ export type ProjectVersion = Pick<ProjectDocument, 'revision' | 'name' | 'update
 export type ProjectHistory = {projectId: string; currentRevision: number; versions: ProjectVersion[]};
 export type ProjectRestoreResult = {project: ProjectDocument; appliedRevision: number; replayed: boolean; compile: ProjectRuntimeStatus['compile']};
 export type ProjectHistoryPreview = {projectId: string; revision: number; previewUrl: string; composition: ProjectComposition};
+export type RetainedArtifact = {
+  kind: 'export' | 'preview'; id: string; projectId: string; projectName: string | null;
+  revision: number; createdAt: string | null; sizeBytes: number; state: string;
+  format?: 'png' | 'gif' | 'mp4'; filename?: string; previewUrl?: string; downloadUrl?: string;
+  composition?: {width: number; height: number};
+};
 export type ProjectRuntimeStatus = {
   revision: number;
   compile: {state: 'idle' | 'compiling' | 'ready' | 'failed'; requestId?: string; message?: string; previewUrl?: string; revision?: number};
@@ -66,8 +72,10 @@ export const studioApi = {
   storage: () => request<StudioStorage>('/storage', {}, 5000, false),
   setStorage: (baseDirectory: string, expectedStorageId: string) => request<StudioStorage>('/storage', {method: 'PUT', ...json({baseDirectory, expectedStorageId})}, 15000, false),
   list: () => request<ProjectSummary[]>('/projects'),
+  retainedArtifacts: () => request<{items: RetainedArtifact[]}>('/retained-artifacts', {}, 180000),
+  deleteRetainedArtifact: (item: Pick<RetainedArtifact, 'kind' | 'id' | 'projectId'>) => request<{deleted: boolean}>(`/retained-artifacts/${item.kind}/${encodeURIComponent(item.id)}`, {method: 'DELETE', ...json({projectId: item.projectId})}, 180000),
   create: (settings: ProjectSettings) => request<ProjectDocument>('/projects', {method: 'POST', ...json(settings)}),
-  deleteProject: (id: string, expectedRevision: number) => request<{projectId: string; deleted: true; cleanupPending?: boolean}>(`/projects/${encodeURIComponent(id)}`, {method: 'DELETE', ...json({expectedRevision})}, 180000),
+  deleteProject: (id: string, expectedRevision: number, deleteAssociatedFiles: boolean) => request<{projectId: string; deleted: true; cleanupPending?: boolean}>(`/projects/${encodeURIComponent(id)}/delete`, {method: 'POST', ...json({expectedRevision, deleteAssociatedFiles})}, 180000),
   open: (id: string) => request<ProjectDocument>(`/projects/${encodeURIComponent(id)}`),
   status: (id: string) => request<ProjectRuntimeStatus>(`/projects/${encodeURIComponent(id)}/status`),
   compile: (id: string, expectedRevision: number) => request<ProjectRuntimeStatus>(`/projects/${encodeURIComponent(id)}/compile`, {method: 'POST', ...json({expectedRevision})}),
