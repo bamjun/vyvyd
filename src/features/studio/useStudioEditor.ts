@@ -20,6 +20,7 @@ const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(or
 const same = (a: unknown, b: unknown) => JSON.stringify(ordered(a)) === JSON.stringify(ordered(b));
 const messageFor = (cause: unknown) => cause instanceof Error ? cause.message : '요청을 처리하지 못했습니다.';
 const storedDraft = (key: string) => {try {return parseStoredStudioDraft(JSON.parse(read(key, true) ?? 'null'));} catch {return null;}};
+const storedDeletion = (key: string): {id: string; name: string} | null => {try {const value = JSON.parse(read(key, true) ?? 'null'); return value && typeof value.id === 'string' && /^[0-9a-f-]{36}$/i.test(value.id) && typeof value.name === 'string' && value.name.length <= 80 ? {id: value.id, name: value.name} : null;} catch {return null;}};
 const loadFrames = (frameKey: string): Record<string, number> => {try {const value: unknown = JSON.parse(read(frameKey) ?? '{}'); if (!value || typeof value !== 'object' || Array.isArray(value)) return {}; return Object.fromEntries(Object.entries(value).filter(([id, frame]) => /^[0-9a-f-]{36}$/i.test(id) && Number.isSafeInteger(frame) && Number(frame) >= 0).map(([id, frame]) => [id, Number(frame)]));} catch {return {};}};
 
 export function useStudioEditor(isActive: boolean, workspaceKey?: string, beforeConnect?: () => Promise<boolean>, baseDirectory?: string) {
@@ -52,6 +53,8 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
   const projectRef = useRef(project), editorRef = useRef(editor), busyRef = useRef(false), connectedRef = useRef(false);
   const pendingRef = useRef<PendingWrite | null>(null), cancelRef = useRef<(() => void) | null>(null);
   const sessions = useRef(new Map<string, Session>()), frames = useRef(loadFrames(frameKey));
+  const deleteKey = `${selectedKey}.pendingDelete`;
+  const uncertainDelete = useRef<{id: string; name: string} | null>(null);
   const beforeConnectRef = useRef(beforeConnect);
   beforeConnectRef.current = beforeConnect;
   const runtimeRef = useRef(runtimeStatus), previewRef = useRef(sourcePreview), remoteRef = useRef(remoteProject);
@@ -93,6 +96,27 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
     sessions.current.set(base.id, {base, history: editorRef.current, preview: previewRef.current, runtime: runtimeRef.current, remote: remoteRef.current, pending: pendingRef.current, ...selectionRef.current, request: selectionRef.current.aiRequest});
   }, [cancelInteraction, persist]);
   const updateSummary = useCallback((doc: ProjectDocument) => setProjects((previous) => [{id: doc.id, name: doc.name, revision: doc.revision, updatedAt: doc.updatedAt, composition: doc.composition, assetCount: doc.assets.length}, ...previous.filter((entry) => entry.id !== doc.id)]), []);
+
+  const finishDeletion = useCallback((entry: {id: string; name: string}, cleanupUnknown = false) => {
+    if (projectRef.current?.id === entry.id) {
+      cancelInteraction(); window.clearTimeout(persistTimer.current);
+      projectRef.current = null; setProject(null); setPending(null);
+      setRuntimeStatus(null); runtimeRef.current = null; setSourcePreview(null); previewRef.current = null;
+      setRemoteProject(null); remoteRef.current = null; setSelectedLayer(null); setSelectedAsset(null); setLayerGeometry([]);
+      setLayerNotice(''); setDraftNotice(''); setVersionHistory(null); setSelectedVersion(null); setRecovery(null); setAiRequest(''); setCopyStatus('');
+      const emptyEditor = createEditHistory<StudioDraftSnapshot>({fields: initialFields, layers: {}});
+      editorRef.current = emptyEditor; setEditor(emptyEditor);
+    }
+    sessions.current.delete(entry.id); delete frames.current[entry.id]; uncertainDelete.current = null;
+    try {
+      sessionStorage.removeItem(draftKey(entry.id)); sessionStorage.removeItem(backupKey(entry.id)); sessionStorage.removeItem(deleteKey);
+      if (localStorage.getItem(selectedKey) === entry.id) localStorage.removeItem(selectedKey);
+      localStorage.setItem(frameKey, JSON.stringify(frames.current));
+    } catch { /* The deleted project's stale local session cannot recreate the project. */ }
+    setProjects((previous) => previous.filter((item) => item.id !== entry.id));
+    setStatus(`“${entry.name}” 프로젝트가 삭제되었습니다.`);
+    if (cleanupUnknown) setError('프로젝트가 목록에서 삭제된 것을 확인했습니다. 연결이 끊겨 파일 정리 완료 여부는 확인할 수 없습니다.');
+  }, [backupKey, cancelInteraction, deleteKey, draftKey, frameKey, selectedKey, setPending]);
 
   const acceptProject = useCallback((doc: ProjectDocument, preserveDraft = false, deltaBase?: StudioDraftSnapshot, reset = false) => {
     const previous = projectRef.current;
@@ -211,6 +235,8 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
       const list = await studioApi.list();
       if (!mounted.current || token !== operation.current) return;
       connectedRef.current = true; setConnected(true); setProjects(list); autoCompileKey.current = ''; setStatus('로컬 서비스 연결됨');
+      const pendingDeletion = uncertainDelete.current ?? storedDeletion(deleteKey);
+      if (pendingDeletion && !list.some((item) => item.id === pendingDeletion.id)) finishDeletion(pendingDeletion, true);
       const id = projectRef.current?.id ?? (initial ? read(selectedKey) : null);
       if (id && list.some((item) => item.id === id)) {
         if (!projectRef.current) {setBusy(false); await activate(id); return;}
@@ -224,7 +250,7 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
       }
     } catch (cause) {if (token === operation.current) {connectedRef.current = false; setConnected(false); markFailure(cause); const id = initial && !projectRef.current ? read(selectedKey) : null; if (id && storedDraft(draftKey(id))) {setBusy(false); await activate(id);}}}
     finally {if (token === operation.current) setBusy(false);}
-  }, [acceptRuntimeStatus, activate, commitInteraction, draftKey, markFailure, persist, reconcile, refreshHistory, resolvePending, selectedKey, setBusy]);
+  }, [acceptRuntimeStatus, activate, commitInteraction, deleteKey, draftKey, finishDeletion, markFailure, persist, reconcile, refreshHistory, resolvePending, selectedKey, setBusy]);
   useEffect(() => {mounted.current = true; if (!initialized.current) {initialized.current = true; void connect(true);} return () => {mounted.current = false; initialized.current = false; operation.current++; window.clearTimeout(persistTimer.current); persist();};}, [connect, persist]);
   useEffect(() => {
     const id = project?.id;
@@ -316,6 +342,51 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
     } catch (cause) {if (token === operation.current) markFailure(cause);}
     finally {if (token === operation.current) setBusy(false);}
   };
+  const deleteProject = async (entry: ProjectSummary) => {
+    if (!connectedRef.current || busyRef.current) return;
+    const unresolved = uncertainDelete.current ?? storedDeletion(deleteKey);
+    if (unresolved && unresolved.id !== entry.id) {
+      setError(`“${unresolved.name}” 삭제 결과를 먼저 확인해 주세요. 다시 연결하거나 해당 프로젝트 삭제를 다시 시도하세요.`);
+      return;
+    }
+    const current = projectRef.current?.id === entry.id;
+    const cached = sessions.current.get(entry.id);
+    const draft = storedDraft(draftKey(entry.id));
+    if (current ? Boolean(pendingRef.current) : Boolean(cached?.pending || draft?.pending)) {
+      setError('이 프로젝트에 결과를 확인하지 못한 저장 요청이 있습니다. 프로젝트를 열어 저장 결과를 확인한 뒤 삭제하세요.');
+      return;
+    }
+    const token = ++operation.current; setBusy(true); setError('');
+    // Remember the confirmed intent before the request, including across reloads.
+    uncertainDelete.current = {id: entry.id, name: entry.name};
+    try {sessionStorage.setItem(deleteKey, JSON.stringify(uncertainDelete.current));} catch { /* Keep the confirmation in memory. */ }
+    try {
+      const revision = current ? projectRef.current!.revision : entry.revision;
+      const result = await studioApi.deleteProject(entry.id, revision);
+      if (!mounted.current || token !== operation.current) return;
+      if (!result.deleted || result.projectId !== entry.id) throw new Error('삭제 결과를 확인하지 못했습니다. 목록을 다시 확인하세요.');
+      finishDeletion(entry);
+      if (result.cleanupPending) {setStatus(`“${entry.name}” 프로젝트를 목록에서 삭제했습니다.`); setError('프로젝트는 목록에서 삭제되었지만 일부 파일을 정리하지 못했습니다. 작업 폴더를 확인해 주세요.');}
+      try {const list = await studioApi.list(); if (mounted.current && token === operation.current) setProjects(list);} catch { /* The local list already reflects the confirmed deletion. */ }
+    } catch (cause) {
+      if (token !== operation.current) return;
+      if (cause instanceof StudioApiError && cause.code === 'PROJECT_NOT_FOUND' && unresolved?.id === entry.id) {
+        try {const list = await studioApi.list(); if (mounted.current && token === operation.current && !list.some((item) => item.id === entry.id)) {setProjects(list); finishDeletion(unresolved, true); return;}} catch { /* Preserve the draft until the outcome is verified. */ }
+      }
+      if (cause instanceof StudioApiError && cause.code === 'REVISION_CONFLICT') {
+        try {const list = await studioApi.list(); if (mounted.current && token === operation.current) setProjects(list);} catch { /* Preserve the original conflict. */ }
+      }
+      markFailure(cause);
+      if (cause instanceof StudioApiError && cause.status === 0) {
+        setError('삭제 결과를 확인하지 못했습니다. 현재 초안은 보관했습니다. 다시 연결한 뒤 프로젝트 목록을 확인하세요.');
+      } else if (!unresolved && cause instanceof StudioApiError && cause.status >= 400 && cause.status < 500) {
+        uncertainDelete.current = null;
+        try {sessionStorage.removeItem(deleteKey);} catch { /* There is no pending result to reconcile. */ }
+      } else if (!(cause instanceof StudioApiError) || cause.status >= 500) {
+        setError('삭제 결과를 확인하지 못했습니다. 현재 초안은 보관했습니다. 다시 연결한 뒤 프로젝트 목록을 확인하세요.');
+      }
+    } finally {if (token === operation.current) setBusy(false);}
+  };
   const addAssets = async (files: File[]) => {
     const base = projectRef.current; if (!base || remoteRef.current || pendingRef.current || !files.length) return;
     commitInteraction(); const token = ++operation.current; setBusy(true); setError(''); let current = base, count = 0; const failures: string[] = [];
@@ -366,7 +437,8 @@ export function useStudioEditor(isActive: boolean, workspaceKey?: string, before
     else if (event.key.toLowerCase() === 'y') {event.preventDefault(); redo();}
   };
   return {projects, project, fields, setFields, newFields, setNewFields, creating, setCreating, connected, busy, status, error, setError, selectedAsset, setSelectedAsset, frame, runtimeStatus, remoteProject, sourcePreview, aiRequest, setAiRequest, copyStatus, setCopyStatus, layerDraft, selectedLayer, layerGeometry, editMode, setEditMode, layerNotice, draftNotice, dirty, registry, previewComposition, previewEdits, inspectorDisabled, editingDisabled, asset, requestText, pendingWrite, recovery, versionHistory, selectedVersion,
-    playerRef, assetInput, connect, openProject: activate, reopenProject: () => project && activate(project.id, true), createProject, importProject, startCreating, save, addAssets, compile, copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer, alignLayer, adoptRemote,
+    playerRef, assetInput, connect, openProject: activate, reopenProject: () => project && activate(project.id, true), createProject, importProject, deleteProject, startCreating, save, addAssets, compile, copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer, alignLayer, adoptRemote,
     undo, redo, canUndo: editor.past.length > 0 || editor.transaction !== null, canRedo: editor.future.length > 0, beginInteraction, endInteraction, registerCancel, keyboardShortcut, refreshHistory, selectVersion, restoreVersion, restoreRecovery,
-    hasDraft: (id: string) => {const session = sessions.current.get(id); return Boolean(session && !same(session.history.present, studioDraftForProject(session.base)) || read(draftKey(id), true));}};
+    hasDraft: (id: string) => {const session = sessions.current.get(id); return Boolean(session && !same(session.history.present, studioDraftForProject(session.base)) || read(draftKey(id), true));},
+    hasDeletionDraft: (id: string) => {const session = sessions.current.get(id); return Boolean(projectRef.current?.id === id && (dirty || recovery) || session && !same(session.history.present, studioDraftForProject(session.base)) || read(draftKey(id), true) || read(backupKey(id), true));}};
 }

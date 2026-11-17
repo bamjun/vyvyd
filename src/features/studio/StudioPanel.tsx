@@ -1,13 +1,14 @@
 import {Player} from '@remotion/player';
-import {ArrowLeft, CheckCircle2, Copy, FolderOpen, ImagePlus, Loader2, Palette, Plus, RefreshCw, Save, Undo2, Redo2} from 'lucide-react';
+import {ArrowLeft, CheckCircle2, Copy, FolderOpen, ImagePlus, Loader2, Palette, Plus, RefreshCw, Save, Trash2, Undo2, Redo2} from 'lucide-react';
 import {BlankPoster} from '../../../packages/studio-runtime/src/BlankPoster';
-import {studioApi} from './studioApi';
+import {studioApi, type ProjectSummary} from './studioApi';
 import StudioSourcePreview from './StudioSourcePreview';
 import StudioLayersPanel from './StudioLayersPanel';
 import StudioHistoryPanel from './StudioHistoryPanel';
+import StudioDeleteDialog from './StudioDeleteDialog';
 import {useStudioEditor} from './useStudioEditor';
 import type {Fields} from './studioEditorSettings';
-import {useEffect, useRef} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import {useMediaTransfer} from '@/hooks/useMediaTransfer';
 import StudioExportPanel from './StudioExportPanel';
 import StudioBundleDownload from './StudioBundleDownload';
@@ -37,6 +38,8 @@ export default function StudioPanel({isActive}: {isActive: boolean}) {
 
 function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: StudioWorkspaceState}) {
   const bundleInput = useRef<HTMLInputElement>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ProjectSummary | null>(null);
+  useEffect(() => {if (!isActive) setDeleteTarget(null);}, [isActive]);
   const {controller: mediaTransfer} = useMediaTransfer();
   const {
     projects, project, fields, setFields, newFields, setNewFields, creating, setCreating, connected, busy,
@@ -44,10 +47,10 @@ function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: Stud
     aiRequest, setAiRequest, copyStatus, setCopyStatus, layerDraft, selectedLayer, layerGeometry, editMode,
     setEditMode, layerNotice, draftNotice, dirty, registry, previewComposition, previewEdits, inspectorDisabled,
     editingDisabled, asset, requestText, pendingWrite, recovery, versionHistory, selectedVersion, playerRef,
-    assetInput, connect, openProject, reopenProject, createProject, startCreating, save, addAssets, compile,
+    assetInput, connect, openProject, reopenProject, createProject, deleteProject, startCreating, save, addAssets, compile,
     copyRequest, selectLayer, changeLayer, measureLayers, updateSourceFrame, reportPreviewError, reorderLayer, alignLayer,
     adoptRemote, undo, redo, canUndo, canRedo, beginInteraction, endInteraction, registerCancel, keyboardShortcut,
-    refreshHistory, selectVersion, restoreVersion, restoreRecovery, hasDraft, importProject,
+    refreshHistory, selectVersion, restoreVersion, restoreRecovery, hasDraft, hasDeletionDraft, importProject,
   } = useStudioEditor(isActive, workspace.storage?.workspaceKey, workspace.beforeConnect, workspace.storage?.baseDirectory);
   useEffect(() => {workspace.onBlockedChange(dirty || busy || Boolean(pendingWrite) || creating, dirty || Boolean(pendingWrite) || creating);}, [workspace.onBlockedChange, dirty, busy, pendingWrite, creating]);
   const previewDocument = project;
@@ -57,7 +60,8 @@ function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: Stud
   const mcpRecent = connected && Number.isFinite(lastMcpSeen) && Date.now() - lastMcpSeen >= 0 && Date.now() - lastMcpSeen < 90000;
   const compileLabels = {idle: '소스 컴파일 대기', compiling: '소스 컴파일 중…', ready: '소스 미리보기 준비됨', failed: '소스 컴파일 실패'};
 
-  return <section onKeyDownCapture={keyboardShortcut} aria-label="포스터 메이커" className="relative space-y-5">
+  return <section onKeyDownCapture={deleteTarget ? undefined : keyboardShortcut} aria-label="포스터 메이커" className="relative space-y-5">
+    {deleteTarget && <StudioDeleteDialog project={deleteTarget} hasDraft={hasDeletionDraft(deleteTarget.id)} onCancel={() => setDeleteTarget(null)} onConfirm={() => {const target = deleteTarget; setDeleteTarget(null); void deleteProject(target);}} />}
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><p className="flex items-center gap-2 text-xs text-purple-300"><Palette size={15} /> 포스터 · 홍보지</p><h2 className="mt-2 text-2xl font-semibold text-white">포스터 메이커</h2><p className="mt-2 text-sm text-gray-400">빈 캔버스에서 시작하고, 이미지와 프로젝트를 이 컴퓨터에 보관하세요.</p></div>
       <button className={buttonClass} disabled={busy} onClick={() => void connect(!project)}><RefreshCw size={14} className={busy ? 'animate-spin' : ''} />{connected ? '연결 확인' : '다시 연결'}</button>
@@ -75,7 +79,7 @@ function StudioEditor({isActive, workspace}: {isActive: boolean; workspace: Stud
         <button className={`${buttonClass} w-full`} disabled={!connected || busy} onClick={() => bundleInput.current?.click()}><FolderOpen size={15} />프로젝트 파일 가져오기</button>
         <input ref={bundleInput} type="file" accept=".vyvyd.json,.json,application/json" aria-label="가져올 프로젝트 파일" className="sr-only" onChange={(event) => {const file = event.target.files?.[0]; event.target.value = ''; if (file) void importProject(file);}} />
         {projects.length === 0 && <p className="text-xs leading-relaxed text-gray-500">아직 프로젝트가 없습니다. 새 프로젝트로 시작하세요.</p>}
-        <div className="max-h-96 space-y-2 overflow-auto">{projects.map((entry) => <button key={entry.id} className={`w-full rounded-lg border p-3 text-left disabled:opacity-40 ${project?.id === entry.id && !creating ? 'border-purple-400/40 bg-purple-500/10' : 'border-white/5 hover:bg-white/5'}`} disabled={busy} aria-label={`프로젝트 열기: ${entry.name}`} onClick={() => void openProject(entry.id)}><span className="block truncate text-sm text-gray-200">{entry.name}</span><span className="mt-1 block text-[11px] text-gray-500">{entry.composition.width} × {entry.composition.height} · 파일 {entry.assetCount}개{(project?.id === entry.id ? dirty : hasDraft(entry.id)) && <span className="ml-2 text-amber-200">초안 있음</span>}</span></button>)}</div>
+        <div className="max-h-96 space-y-2 overflow-auto">{projects.map((entry) => <div key={entry.id} className={`flex items-center rounded-lg border ${project?.id === entry.id && !creating ? 'border-purple-400/40 bg-purple-500/10' : 'border-white/5 hover:bg-white/5'}`}><button className="min-w-0 flex-1 p-3 text-left disabled:opacity-40" disabled={busy} aria-label={`프로젝트 열기: ${entry.name}`} onClick={() => void openProject(entry.id)}><span className="block truncate text-sm text-gray-200">{entry.name}</span><span className="mt-1 block text-[11px] text-gray-500">{entry.composition.width} × {entry.composition.height} · 파일 {entry.assetCount}개{(project?.id === entry.id ? dirty : hasDraft(entry.id)) && <span className="ml-2 text-amber-200">초안 있음</span>}</span></button><button type="button" className="mr-1 rounded-lg p-2 text-gray-500 hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40" disabled={!connected || busy} aria-label={`프로젝트 삭제: ${entry.name}`} title="프로젝트 삭제" onClick={() => setDeleteTarget(entry)}><Trash2 size={15} /></button></div>)}</div>
       </aside>
       {creating ? <div className="rounded-xl border border-white/10 p-5"><div className="mb-4 flex items-center justify-between"><h3 className="font-semibold text-white">빈 프로젝트 만들기</h3><button className={buttonClass} disabled={busy} onClick={() => setCreating(false)}><ArrowLeft size={14} />돌아가기</button></div><SettingsFields fields={newFields} onChange={setNewFields} disabled={busy} creating /><p className="mt-3 text-xs text-gray-500">디자인이 없는 빈 캔버스로 시작합니다. 길이는 FPS에 맞는 프레임 수로 저장됩니다.</p><button className={`${primaryClass} mt-5`} disabled={busy || !connected} onClick={() => void createProject()}>{busy ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}프로젝트 만들기</button></div>
       : project && previewComposition ? <div className="min-w-0 space-y-5">

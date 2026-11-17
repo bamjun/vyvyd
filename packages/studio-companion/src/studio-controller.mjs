@@ -26,7 +26,15 @@ export function createStudioController({store, runtime, origin = () => 'http://1
   const jobs = new Map();
   const restorations = new Map();
   const historyPreviews = new Map();
+  const restoring = new Set();
+  const deletingProjects = new Set();
+  const deletedProjects = new Set();
   let mcp = {};
+  const assertAvailable = (id) => {
+    id = id.toLowerCase();
+    if (deletedProjects.has(id)) throw error('PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.', 404);
+    if (deletingProjects.has(id)) throw error('PROJECT_DELETE_BUSY', '프로젝트 삭제가 끝난 뒤 다시 시도해 주세요.', 409);
+  };
   const state = (id) => {
     id = id.toLowerCase();
     if (!states.has(id)) states.set(id, {state: 'idle'});
@@ -47,15 +55,19 @@ export function createStudioController({store, runtime, origin = () => 'http://1
     states.set(id, {...previous, state: 'failed', requestId, message: cause.message, diagnostics: cause.diagnostics ?? []});
   };
   const restore = async (project) => {
+    assertAvailable(project.id);
     if (!runtime.findSnapshot || state(project.id).snapshot || state(project.id).state === 'compiling') return;
     const key = `${project.id}/${project.revision}`;
     if (!restorations.has(key)) {
       const previous = state(project.id);
+      restoring.add(key);
       const promise = (async () => {
-        const snapshot = await runtime.findSnapshot(project, {origin: origin()});
-        if (snapshot && state(project.id) === previous) states.set(project.id, {...previous,
-          state: previous.state === 'failed' ? 'failed' : 'ready', snapshot,
-          previewUrl: snapshot.previewUrl, revision: project.revision});
+        try {
+          const snapshot = await runtime.findSnapshot(project, {origin: origin()});
+          if (!deletingProjects.has(project.id) && !deletedProjects.has(project.id) && snapshot && state(project.id) === previous) states.set(project.id, {...previous,
+            state: previous.state === 'failed' ? 'failed' : 'ready', snapshot,
+            previewUrl: snapshot.previewUrl, revision: project.revision});
+        } finally {restoring.delete(key);}
       })();
       restorations.set(key, promise);
       void promise.catch(() => {restorations.delete(key);});
@@ -121,6 +133,7 @@ export function createStudioController({store, runtime, origin = () => 'http://1
     async status(id) {
       const project = await store.readProject(id);
       await restore(project);
+      assertAvailable(project.id);
       return {revision: project.revision, compile: publicState(project.id), mcp};
     },
     async refresh(id, revision) {
@@ -128,6 +141,7 @@ export function createStudioController({store, runtime, origin = () => 'http://1
     },
     async compile(id, expectedRevision) {
       const project = await store.readProject(id);
+      assertAvailable(project.id);
       if (project.revision !== expectedRevision) throw error('REVISION_CONFLICT', '최신 프로젝트의 수정 번호가 필요합니다.', 409);
       if (state(project.id).state === 'ready' && state(project.id).revision === project.revision) return controller.status(project.id);
       if (!jobs.has(project.id)) {
@@ -155,6 +169,7 @@ export function createStudioController({store, runtime, origin = () => 'http://1
       // A historical preview is immutable and never becomes the active project
       // preview. Deduplicate requests and bound outstanding compilation work.
       const project = await store.readHistory(id, revision);
+      assertAvailable(project.id);
       const key = `${project.id}/${revision}`;
       if (historyPreviews.has(key)) return historyPreviews.get(key);
       if (historyPreviews.size >= 4) throw error('HISTORY_PREVIEW_BUSY', '다른 저장 버전의 미리보기를 준비하고 있습니다. 잠시 후 다시 시도해 주세요.', 429);
@@ -208,6 +223,7 @@ export function createStudioController({store, runtime, origin = () => 'http://1
       if (name === 'studio_read_project') {
         const project = await store.readProject(args.projectId);
         await restore(project);
+        assertAvailable(project.id);
         return {...(args.includeSource ? project : summary(project)), layers: readLayerRegistry(project), compile: publicState(project.id)};
       }
       if (name === 'studio_read_file') {
@@ -265,7 +281,10 @@ export function createStudioController({store, runtime, origin = () => 'http://1
       }
       throw error('UNKNOWN_TOOL', '지원하지 않는 Codex 도구입니다.', 404);
     },
-    busy() {return jobs.size > 0 || inFlight.size > 0 || [...states.values()].some((value) => value.state === 'compiling');},
+    beginProjectDelete(id) {deletingProjects.add(id.toLowerCase());},
+    cancelProjectDelete(id) {deletingProjects.delete(id.toLowerCase());},
+    forgetProject(id) {id = id.toLowerCase(); deletingProjects.delete(id); deletedProjects.add(id); states.delete(id); for (const key of restorations.keys()) if (key.startsWith(`${id}/`)) restorations.delete(key);},
+    busy() {return jobs.size > 0 || inFlight.size > 0 || historyPreviews.size > 0 || restoring.size > 0 || [...states.values()].some((value) => value.state === 'compiling');},
     async settled() {await Promise.allSettled([...jobs.values(), ...historyPreviews.values(), ...[...inFlight.values()].map((entry) => entry.promise)]);},
   };
   return controller;

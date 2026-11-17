@@ -121,14 +121,28 @@ const assertAssetName = (name) => {
   return name;
 };
 
-export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
+export function createProjectStore({dataDir = DEFAULT_DATA_DIR, removeDeletedDirectory = (directory) => rm(directory, {recursive: true})} = {}) {
   const root = path.resolve(dataDir);
   const queues = new Map();
+  let cleanupOnStartup;
 
   const ensureRoot = async () => {
     await mkdir(root, {recursive: true});
     const stat = await lstat(root);
     if (!stat.isDirectory() || stat.isSymbolicLink()) fail('UNSAFE_STORAGE_PATH', '저장 폴더는 일반 디렉터리여야 합니다.', 500);
+    // A prior deletion can leave a tombstone when Windows has files locked.
+    // Retry once per store startup, and only for safe, UUID-named children.
+    cleanupOnStartup ??= (async () => {
+      for (const item of await readdir(root, {withFileTypes: true})) {
+        if (!/^\.deleted-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item.name)) continue;
+        const candidate = path.join(root, item.name);
+        const info = await lstat(candidate).catch(() => null);
+        if (path.dirname(candidate) !== root || path.relative(root, candidate) !== item.name
+          || !info?.isDirectory() || info.isSymbolicLink()) continue;
+        await removeDeletedDirectory(candidate).catch(() => undefined);
+      }
+    })();
+    await cleanupOnStartup;
   };
 
   const projectDirectory = async (id, create = false) => {
@@ -269,6 +283,40 @@ export function createProjectStore({dataDir = DEFAULT_DATA_DIR} = {}) {
       return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
     },
     readProject,
+    async deleteProject(id, {expectedRevision} = {}) {
+      id = assertId(id);
+      return serialized(id, async () => {
+        const {document} = await readRecord(id);
+        assertCurrentRevision(document, expectedRevision);
+        const directory = await projectDirectory(id);
+        // Only the UUID-named direct child just validated by projectDirectory
+        // may be removed. Never recurse through a replaced project junction.
+        const relative = path.relative(root, directory);
+        const info = await lstat(directory);
+        if (relative !== id || path.dirname(directory) !== root || !UUID.test(path.basename(directory))
+          || !info.isDirectory() || info.isSymbolicLink()) {
+          fail('UNSAFE_STORAGE_PATH', '프로젝트 저장 경로가 올바르지 않습니다.', 500);
+        }
+        // Rename first: once committed, partial filesystem cleanup cannot
+        // leave a damaged project visible as if the deletion had failed.
+        const tombstoneName = `.deleted-${id}-${randomUUID()}`;
+        const tombstone = path.join(root, tombstoneName);
+        if (path.dirname(tombstone) !== root || path.relative(root, tombstone) !== tombstoneName) {
+          fail('UNSAFE_STORAGE_PATH', '프로젝트 저장 경로가 올바르지 않습니다.', 500);
+        }
+        await rename(directory, tombstone);
+        try {
+          const renamed = await lstat(tombstone);
+          if (!renamed.isDirectory() || renamed.isSymbolicLink()) throw new Error('Unsafe deleted project directory');
+          await removeDeletedDirectory(tombstone);
+          return {projectId: id, deleted: true};
+        } catch {
+          // The project is already removed from the listing. Inform the caller
+          // if locked files remain instead of claiming they were erased.
+          return {projectId: id, deleted: true, cleanupPending: true};
+        }
+      });
+    },
     async listHistory(id) {
       const {document, history} = await readRecord(id);
       return {projectId: document.id, currentRevision: document.revision,

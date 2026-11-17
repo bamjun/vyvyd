@@ -67,6 +67,7 @@ export const studioApi = {
   setStorage: (baseDirectory: string, expectedStorageId: string) => request<StudioStorage>('/storage', {method: 'PUT', ...json({baseDirectory, expectedStorageId})}, 15000, false),
   list: () => request<ProjectSummary[]>('/projects'),
   create: (settings: ProjectSettings) => request<ProjectDocument>('/projects', {method: 'POST', ...json(settings)}),
+  deleteProject: (id: string, expectedRevision: number) => request<{projectId: string; deleted: true; cleanupPending?: boolean}>(`/projects/${encodeURIComponent(id)}`, {method: 'DELETE', ...json({expectedRevision})}, 180000),
   open: (id: string) => request<ProjectDocument>(`/projects/${encodeURIComponent(id)}`),
   status: (id: string) => request<ProjectRuntimeStatus>(`/projects/${encodeURIComponent(id)}/status`),
   compile: (id: string, expectedRevision: number) => request<ProjectRuntimeStatus>(`/projects/${encodeURIComponent(id)}/compile`, {method: 'POST', ...json({expectedRevision})}),

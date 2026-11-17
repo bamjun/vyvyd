@@ -90,6 +90,7 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
   let workspace = makeWorkspace(dataDir, exportDataDir);
   let activeMutations = 0;
   let switching = false;
+  let deleting = false;
   let storageChanged = false;
 
   const server = createServer(async (request, response) => {
@@ -138,13 +139,13 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         if (typeof origin !== 'string' || !origins.has(origin)) throw error('ORIGIN_NOT_ALLOWED', '허용된 vyvyd 화면에서만 연결할 수 있습니다.', 403);
         response.setHeader('Access-Control-Allow-Origin', origin);
       }
-      const mutation = request.method === 'POST' || request.method === 'PUT';
+      const mutation = request.method === 'POST' || request.method === 'PUT' || request.method === 'DELETE';
       // Node fetch also adds Sec-Fetch-Mode; Site/Dest identify browser requests without rejecting local CLI clients.
       if (mutation && origin === undefined && (request.headers['sec-fetch-site'] !== undefined || request.headers['sec-fetch-dest'] !== undefined)) {
         throw error('ORIGIN_REQUIRED', '브라우저 수정 요청에는 Origin이 필요합니다.', 403);
       }
       if (request.method === 'OPTIONS') {
-        response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, OPTIONS');
+        response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, DELETE, OPTIONS');
         response.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name, X-Expected-Revision, X-Studio-Storage-Id');
         response.setHeader('Access-Control-Max-Age', '600');
         if (request.headers['access-control-request-private-network'] === 'true') response.setHeader('Access-Control-Allow-Private-Network', 'true');
@@ -201,6 +202,7 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
         return;
       }
       if (switching) throw error('STORAGE_SWITCHING', '작업 폴더를 변경하고 있습니다. 잠시 후 다시 연결해 주세요.', 409);
+      if (mutation && deleting) throw error('PROJECT_DELETE_BUSY', '프로젝트 삭제가 끝난 뒤 다시 시도해 주세요.', 409);
       const providedScope = request.headers['x-studio-storage-id'];
       const scopeQueries = requestUrl.searchParams.getAll('storageId');
       if (providedScope !== undefined && providedScope !== workspace.metadata.storageId
@@ -288,6 +290,25 @@ export function createStudioServer({dataDir = DEFAULT_DATA_DIR, allowedOrigins =
       if (projectRoute) {
         if (request.method === 'GET') json(response, 200, await store.readProject(projectRoute[1]));
         else if (request.method === 'PUT') json(response, 200, await controller.save(projectRoute[1], await readJson(request)));
+        else if (request.method === 'DELETE') {
+          const input = await readJson(request);
+          // Establish a service-wide write gate before the first await. A write
+          // already admitted, a background compile, or an export must finish
+          // before removing a project and its immutable history.
+          if (deleting || activeMutations !== 1 || controller.busy() || exports.busy()) {
+            throw error('PROJECT_BUSY', '저장, 미리보기 또는 출력 작업을 마친 뒤 삭제해 주세요.', 409);
+          }
+          deleting = true;
+          controller.beginProjectDelete(projectRoute[1]);
+          try {
+            const result = await store.deleteProject(projectRoute[1], input);
+            controller.forgetProject(result.projectId);
+            json(response, 200, result);
+          } catch (cause) {
+            controller.cancelProjectDelete(projectRoute[1]);
+            throw cause;
+          } finally {deleting = false;}
+        }
         else throw error('METHOD_NOT_ALLOWED', '지원하지 않는 요청 방식입니다.', 405);
         return;
       }
